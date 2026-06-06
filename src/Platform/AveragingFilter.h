@@ -34,8 +34,11 @@ public:
 		}
 	}
 
-	// Call this to put a new reading into the filter
-	void ProcessReading(uint16_t r) noexcept
+	// Call this to put a new reading into the filter.
+	// This is declared 'volatile' deliberately: on the SAMC21 (Cortex-M0+) -O3 build, marking only the data
+	// members volatile did NOT change the generated code for this function, but qualifying the method volatile
+	// does (the index/sum accesses then become real loads/stores instead of being held in registers).
+	void ProcessReading(uint16_t r) volatile noexcept
 	{
 		TaskCriticalSectionLocker lock;
 
@@ -78,13 +81,9 @@ public:
 
 private:
 	// These fields are written by the ADC callback (ISR or high-priority task) and read by other tasks.
-	// They MUST be declared volatile: the member functions above are volatile-qualified, but the filter
-	// objects themselves are plain (non-volatile) statics. With -O3 the compiler is therefore free to keep
-	// 'sum' in a register and to reorder the stores in ProcessReading across the ISR boundary. The result
-	// was that thermistor / Vref / Vssa readings could be cached at a stale (too low) value and only jump to
-	// the correct value under interrupt load. Declaring the storage volatile forces a real memory access on
-	// every read and write at all optimisation levels. This is the permanent equivalent of the work-arounds
-	// that "healed" the bug: printing Vref/Vssa from Spin (which forces a volatile read), or building at -O2.
+	// They are kept volatile as documentation of the shared/concurrent access, but note that on the SAMC21
+	// (Cortex-M0+) -O3 build, making the members volatile alone did not change the generated code - it was
+	// qualifying ProcessReading() itself volatile (see above) that forced real memory accesses there.
 	volatile uint16_t readings[numAveraged];
 	volatile size_t index;
 	volatile uint32_t sum;
@@ -96,7 +95,7 @@ private:
 // This is called from an ISR or high priority task to add a new reading to the filter.
 template<size_t numAveraged> void AveragingFilter<numAveraged>::CallbackFeedIntoFilter(CallbackParameter cp, uint32_t val) noexcept
 {
-	static_cast<AveragingFilter<numAveraged>*>(cp.vp)->ProcessReading((uint16_t)val);
+	static_cast<volatile AveragingFilter<numAveraged>*>(cp.vp)->ProcessReading((uint16_t)val);
 }
 
 template<size_t numAveraged> bool AveragingFilter<numAveraged>::CheckIntegrity() const noexcept
