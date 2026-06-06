@@ -194,6 +194,14 @@ void CanInterface::Init(CanAddress defaultBoardAddress, bool useAlternatePins, b
 		SetPinFunction(PortBPin(13), GpioPinFunction::H);
 		SetPinFunction(PortBPin(12), GpioPinFunction::H);
 		whichPort = 1;											// use CAN1 on EXP3HC
+# ifdef EXP3HC
+		// On later board variants, initialise the second CAN port to avoid generating spurious signals on the second CAN bus
+		if (Platform::GetBoardVariant() > 2)
+		{
+			SetPinFunction(PortAPin(23), GpioPinFunction::I);
+			SetPinFunction(PortAPin(22), GpioPinFunction::I);
+		}
+# endif
 	}
 #elif SAMC21
 	if (useAlternatePins)
@@ -483,6 +491,7 @@ CanMessageBuffer *CanInterface::ProcessReceivedMessage(CanMessageBuffer *buf) no
 					{
 						const int32_t stepsWanted = buf->msg.revertPosition.finalStepCounts[index++];
 						const int32_t stepsTaken = moveInstance->GetLastMoveStepsTaken(driver);
+						//debugPrintf("Driver %u revert, wanted %ld taken %ld\n", driver, stepsWanted, stepsTaken);
 						if (((stepsWanted >= 0 && stepsTaken > stepsWanted) || (stepsWanted <= 0 && stepsTaken < stepsWanted)))
 						{
 							steps = stepsWanted - stepsTaken;
