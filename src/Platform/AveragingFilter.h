@@ -77,10 +77,18 @@ public:
 	bool CheckIntegrity() const noexcept;
 
 private:
-	uint16_t readings[numAveraged];
-	size_t index;
-	uint32_t sum;
-	bool isValid;
+	// These fields are written by the ADC callback (ISR or high-priority task) and read by other tasks.
+	// They MUST be declared volatile: the member functions above are volatile-qualified, but the filter
+	// objects themselves are plain (non-volatile) statics. With -O3 the compiler is therefore free to keep
+	// 'sum' in a register and to reorder the stores in ProcessReading across the ISR boundary. The result
+	// was that thermistor / Vref / Vssa readings could be cached at a stale (too low) value and only jump to
+	// the correct value under interrupt load. Declaring the storage volatile forces a real memory access on
+	// every read and write at all optimisation levels. This is the permanent equivalent of the work-arounds
+	// that "healed" the bug: printing Vref/Vssa from Spin (which forces a volatile read), or building at -O2.
+	volatile uint16_t readings[numAveraged];
+	volatile size_t index;
+	volatile uint32_t sum;
+	volatile bool isValid;
 	//invariant(sum == + over readings)
 	//invariant(index < numAveraged)
 };
