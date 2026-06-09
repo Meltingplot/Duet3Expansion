@@ -34,11 +34,8 @@ public:
 		}
 	}
 
-	// Call this to put a new reading into the filter.
-	// This is declared 'volatile' deliberately: on the SAMC21 (Cortex-M0+) -O3 build, marking only the data
-	// members volatile did NOT change the generated code for this function, but qualifying the method volatile
-	// does (the index/sum accesses then become real loads/stores instead of being held in registers).
-	void ProcessReading(uint16_t r) volatile noexcept
+	// Call this to put a new reading into the filter
+	void ProcessReading(uint16_t r) noexcept
 	{
 		TaskCriticalSectionLocker lock;
 
@@ -80,14 +77,10 @@ public:
 	bool CheckIntegrity() const noexcept;
 
 private:
-	// These fields are written by the ADC callback (ISR or high-priority task) and read by other tasks.
-	// They are kept volatile as documentation of the shared/concurrent access, but note that on the SAMC21
-	// (Cortex-M0+) -O3 build, making the members volatile alone did not change the generated code - it was
-	// qualifying ProcessReading() itself volatile (see above) that forced real memory accesses there.
-	volatile uint16_t readings[numAveraged];
-	volatile size_t index;
-	volatile uint32_t sum;
-	volatile bool isValid;
+	uint16_t readings[numAveraged];
+	size_t index;
+	uint32_t sum;
+	bool isValid;
 	//invariant(sum == + over readings)
 	//invariant(index < numAveraged)
 };
@@ -95,7 +88,7 @@ private:
 // This is called from an ISR or high priority task to add a new reading to the filter.
 template<size_t numAveraged> void AveragingFilter<numAveraged>::CallbackFeedIntoFilter(CallbackParameter cp, uint32_t val) noexcept
 {
-	static_cast<volatile AveragingFilter<numAveraged>*>(cp.vp)->ProcessReading((uint16_t)val);
+	static_cast<AveragingFilter<numAveraged>*>(cp.vp)->ProcessReading((uint16_t)val);
 }
 
 template<size_t numAveraged> bool AveragingFilter<numAveraged>::CheckIntegrity() const noexcept
