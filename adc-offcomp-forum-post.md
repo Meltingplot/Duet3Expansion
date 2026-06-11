@@ -17,7 +17,7 @@ Sweeping the averaging count 64 -> 128 -> 256 -> 512 -> 1024 only **dilutes** th
 
 Longer sampling reduces the channel-to-channel carryover but does not fully remove it, and it forces OFFCOMP off (no comparator auto-zero).
 
-## C. OFFCOMP + a single NOP in the DMAC EnableChannel path (just before SWTRIG)
+## C. OFFCOMP + a single NOP in the DMAC EnableChannel path (at the DMA channel enable, around the start of the conversion)
 
 - OFFCOMP on, no NOP: Vssa = 1070 ct, sigma = 27, r = -0.82 -> worst offset (~54 mV)
 - OFFCOMP on, +NOP: Vssa = 191 ct, sigma = 1.2, r = **+0.39** -> fully healed, lowest noise of all
@@ -33,9 +33,9 @@ Longer sampling reduces the channel-to-channel carryover but does not fully remo
 
 ## Working hypothesis (revised)
 
-It is *not* a fixed time gap. The single NOP is only one of **many** flash-layout perturbations that heal the bug — any unrelated code change that shifts the flash layout does the same. So the determining variable is almost certainly the **NVM-cache occupancy** (which code lands in which of the 8 direct-mapped 64-bit cache lines), not the few cycles between the NOP and SWTRIG.
+It is *not* a fixed time gap, and it is not specifically about the SWTRIG write. The single NOP is only one of **many** flash-layout perturbations that heal the bug — any unrelated code change that shifts the flash layout does the same. So the determining variable is almost certainly the **NVM-cache occupancy** (which code lands in which of the 8 direct-mapped 64-bit cache lines), not a fixed instruction-count delay.
 
-Cache hit/miss patterns along the ADC re-arm path produce variable CPU/bus timing depending on the flash layout. What we can state from the measurements is the **observable effect**: in the bad layout the OFFCOMP stage effectively does not perform its compensation — the result carries the full uncompensated offset (~40 mV), the effect is comp-specific (879 vs 92 ct), and it decays down the sequence (first conversion worst). In a benign layout the same OFFCOMP stage produces the correct, low-noise result (Vssa 191 ct, sigma 1.2).
+The standing suspicion is the **DMA channel and the beginning of the conversion** — the NOP sits in the DMAC `EnableChannel` path, i.e. where the DMA channel is armed just as the conversion starts. Cache hit/miss patterns there produce variable CPU/bus timing depending on the flash layout (DMA arming, descriptor access, and bus contention with the first result transfer at conversion start). What we can state from the measurements is the **observable effect**: in the bad layout the OFFCOMP stage effectively does not perform its compensation — the result carries the full uncompensated offset (~40 mV), the effect is comp-specific (879 vs 92 ct), and it decays down the sequence (first conversion worst). In a benign layout the same OFFCOMP stage produces the correct, low-noise result (Vssa 191 ct, sigma 1.2).
 
 **What exactly makes the OFFCOMP unit stop working under a particular cache layout is internal to the silicon and can only be answered by Microchip.** From the firmware side all we can say is that it is triggered by the flash/NVM-cache layout, not by a fixed instruction-count delay — a NOP is therefore not a fix, it is luck: it nudges the cache into a benign layout for this one build.
 
