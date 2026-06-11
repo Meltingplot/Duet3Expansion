@@ -27,18 +27,25 @@ Longer sampling reduces the channel-to-channel carryover but does not fully remo
 
 1. A tiny code-timing shift (the NOP only delays SWTRIG by a few cycles) heals the offset and flips the Vssa/Vref anti-correlation away (-0.82 -> +0.39).
 2. The NOP's effect is ~10x larger with OFFCOMP enabled (delta 879 ct) than with it disabled (delta 92 ct) -> the dominant ~40 mV error is specific to the comparator offset-compensation phase.
-3. The error decays down the sequence: Vssa (1st) -879 >> Vref (2nd) -452 >> Vin (3rd) ~0 -> signature of a **cold-started OFFCOMP/auto-zero in the first conversion of each sweep**, diluting down the sequence.
+3. The error decays down the sequence: Vssa (1st) -879 >> Vref (2nd) -452 >> Vin (3rd) ~0 -> the first conversion of each sweep is hit worst, diminishing down the sequence.
 4. **SEQBUSY is irrelevant** here: by the time the DMA-completion callback re-arms the ADC, the sequencer is necessarily idle (otherwise the callback would not have fired).
 5. Per the datasheet (Fig. 38-5, register map in 38.7): OFFCOMP is fused into the first STATE of every conversion ("Offset Compensation and Sampling"). **There is no OFFCOMP-ready flag and no analog-busy register** — only RESRDY, SEQBUSY and SYNCBUSY exist. The comp phase cannot be polled.
 
-## Working hypothesis
+## Working hypothesis (revised)
 
-Re-asserting SWTRIG too soon after the previous sweep corrupts the first conversion's comparator auto-zero; the NOP simply grants the analog core recovery time.
+It is *not* a fixed time gap. The single NOP is only one of **many** flash-layout perturbations that heal the bug — any unrelated code change that shifts the flash layout does the same. So the determining variable is almost certainly the **NVM-cache occupancy** (which code lands in which of the 8 direct-mapped 64-bit cache lines), not the few cycles between the NOP and SWTRIG.
+
+Cache hit/miss patterns along the ADC re-arm path produce variable CPU/bus timing depending on the flash layout. What we can state from the measurements is the **observable effect**: in the bad layout the OFFCOMP stage effectively does not perform its compensation — the result carries the full uncompensated offset (~40 mV), the effect is comp-specific (879 vs 92 ct), and it decays down the sequence (first conversion worst). In a benign layout the same OFFCOMP stage produces the correct, low-noise result (Vssa 191 ct, sigma 1.2).
+
+**What exactly makes the OFFCOMP unit stop working under a particular cache layout is internal to the silicon and can only be answered by Microchip.** From the firmware side all we can say is that it is triggered by the flash/NVM-cache layout, not by a fixed instruction-count delay — a NOP is therefore not a fix, it is luck: it nudges the cache into a benign layout for this one build.
 
 ## Deterministic fix candidates (a status poll is impossible)
 
-- Prepend one throwaway conversion to the sequence to absorb the cold-start (DMA length +1, discard the first result); or
-- Insert a calibrated inter-sweep delay before SWTRIG.
+A fixed NOP or a calibrated delay is **not** reliable, because the disturbance is cache-occupancy jitter, not a fixed time gap. Robust options remove the dependence on layout/timing entirely:
+
+- **Discard the first conversion** — prepend one throwaway channel to the sequence (DMA length +1, drop the first result). Immune to cache/timing phase: the potentially corrupted first conversion is never used.
+- **Make the re-arm path cache-deterministic** — run StartConversion and the callback path from RAM (`__ramfunc`) and/or with DSB barriers, so cache occupancy no longer modulates the timing (DC42 already added DSBs along these lines).
+- **Avoid the stop/restart race** — keep the ADC sequencing continuously instead of re-triggering each sweep, so there is no re-arm phase to land in a bad window.
 
 ## Proposed startup self-test gate (fail-safe)
 
