@@ -212,6 +212,97 @@ inline bool IsPositive(motioncalc_t f) noexcept
 #endif
 }
 
+// Test whether a < b, where both operands are known to be non-negative and not a NaN (which is always the case in
+// the step interrupt's motion calculations). For a non-negative IEEE value the bit pattern increases monotonically
+// with the value, so on MCUs without a hardware FPU we can compare the bit patterns as unsigned integers and avoid
+// the soft-float comparison routine, which lives in flash and is comparatively slow.
+inline bool IsLessThanNonNegative(motioncalc_t a, motioncalc_t b) noexcept
+{
+#if (SAMC21 || RP2040) && !USE_DOUBLE_MOTIONCALC && !defined(__ECV__)
+# pragma GCC diagnostic push
+# pragma GCC diagnostic ignored "-Wstrict-aliasing"
+	return *reinterpret_cast<const uint32_t*>(&a) < *reinterpret_cast<const uint32_t*>(&b);
+# pragma GCC diagnostic pop
+#else
+	return a < b;
+#endif
+}
+
+// Test whether fabs(a) <= limit, where limit is a non-negative, non-NaN value. Masking off the sign bit yields the
+// bit pattern of fabs(a); comparing it as an unsigned integer against the bit pattern of the non-negative limit gives
+// exactly the same result as the floating point compare for every operand, including infinity and NaN, because a NaN
+// masks to a value greater than that of any finite limit and IEEE <= is false for a NaN, so both yield false. This
+// avoids the soft-float comparison routine and fabs.
+inline bool FabsLessThanOrEqual(motioncalc_t a, motioncalc_t limit) noexcept
+{
+#if (SAMC21 || RP2040) && !USE_DOUBLE_MOTIONCALC && !defined(__ECV__)
+# pragma GCC diagnostic push
+# pragma GCC diagnostic ignored "-Wstrict-aliasing"
+	return (*reinterpret_cast<const uint32_t*>(&a) & 0x7FFFFFFFu) <= *reinterpret_cast<const uint32_t*>(&limit);
+# pragma GCC diagnostic pop
+#else
+	return fabsm(a) <= limit;
+#endif
+}
+
+// Fast conversion of an unsigned integer into motioncalc_t.
+// On Cortex-M0+ there is no hardware FPU and no CLZ instruction, so the soft-float library converts an
+// integer to float using a normalisation shift loop that costs of the order of 100-160 clocks. We avoid
+// that loop by finding the most significant bit with a loop-free binary search (about 5 comparisons) and
+// assembling the IEEE-754 bit pattern directly. The result is bit-identical to (motioncalc_t)v for every
+// uint32_t value, including correct round-to-nearest-even for the rare values that need more than 24 bits.
+// Boards with hardware FP or double motioncalc_t fall back to the normal cast.
+static inline motioncalc_t FastUintToMotionCalc(uint32_t v) noexcept
+{
+#if (SAMC21 || RP2040) && !USE_DOUBLE_MOTIONCALC && !defined(__ECV__)
+	if (v == 0)
+	{
+		return (motioncalc_t)0.0;
+	}
+	uint32_t n = v, e = 0;											// find e = floor(log2 v) without a loop
+	if (n >= (1u << 16)) { n >>= 16; e += 16; }
+	if (n >= (1u << 8))  { n >>= 8;  e += 8; }
+	if (n >= (1u << 4))  { n >>= 4;  e += 4; }
+	if (n >= (1u << 2))  { n >>= 2;  e += 2; }
+	if (n >= (1u << 1))  {            e += 1; }
+	uint32_t mant;
+	if (e <= 23)
+	{
+		mant = (v << (23 - e)) & 0x7FFFFFu;							// value fits in the mantissa, exact, no rounding
+	}
+	else
+	{
+		const uint32_t sh = e - 23;
+		const uint32_t rb = 1u << (sh - 1);							// the rounding bit
+		const uint32_t frac = v & ((1u << sh) - 1);
+		mant = (v >> sh) & 0x7FFFFFu;
+		if (frac > rb || (frac == rb && (mant & 1) != 0))			// round to nearest, ties to even
+		{
+			if (++mant == 0x800000u) { mant = 0; ++e; }				// mantissa overflow carries into the exponent
+		}
+	}
+	const uint32_t bits = ((127u + e) << 23) | mant;
+# pragma GCC diagnostic push
+# pragma GCC diagnostic ignored "-Wstrict-aliasing"
+	return *reinterpret_cast<const float*>(&bits);
+# pragma GCC diagnostic pop
+#else
+	return (motioncalc_t)v;
+#endif
+}
+
+// As FastUintToMotionCalc but for a signed value: convert the magnitude and apply the sign.
+static inline motioncalc_t FastIntToMotionCalc(int32_t v) noexcept
+{
+#if (SAMC21 || RP2040) && !USE_DOUBLE_MOTIONCALC && !defined(__ECV__)
+	const uint32_t mag = (v < 0) ? (0u - (uint32_t)v) : (uint32_t)v;
+	const motioncalc_t r = FastUintToMotionCalc(mag);
+	return (v < 0) ? -r : r;
+#else
+	return (motioncalc_t)v;
+#endif
+}
+
 // Normalise this segment by removing very small accelerations that cause problems, update t0, return true if it is linear
 // Called only from DriveMovement::NewSegment. Speed critical, hence inline and the rather unusual behaviour.
 // Returns:
@@ -235,8 +326,10 @@ inline bool MoveSegment::NormaliseAndCheckLinear(motioncalc_t distanceCarriedFor
 		// so approximately when (p*N)^4 < 8*q^3, or very roughly when p*N << q
 		// However, using the Maclaurin expansion requires an extra division in each step calculation, which we would prefer to avoid.
 		// 2. We can convert the segment to a constant-speed segment, on the assumption that the speed won't change much during it. This is what we currently do.
-		const motioncalc_t provisionalT0 = (motioncalc_t)0.5 * (motioncalc_t)duration - distance/(a * (motioncalc_t)duration);
-		if (likely(fabsm(provisionalT0) <= 4 * (motioncalc_t)16777216.0))
+		const motioncalc_t durationF = FastUintToMotionCalc(duration);
+		const motioncalc_t provisionalT0 = (motioncalc_t)0.5 * durationF - distance/(a * durationF);
+		// Issue #2 above causes trouble when fabs(t0) exceeds 4 * 2^24, so fall through to a linear move if it does.
+		if (likely(FabsLessThanOrEqual(provisionalT0, 4 * (motioncalc_t)16777216.0)))
 		{
 			t0 = provisionalT0;
 			return false;
@@ -247,7 +340,7 @@ inline bool MoveSegment::NormaliseAndCheckLinear(motioncalc_t distanceCarriedFor
 	}
 
 	// The move is constant speed
-	t0 = -distanceCarriedForwards * (motioncalc_t)duration/distance;
+	t0 = -distanceCarriedForwards * FastUintToMotionCalc(duration)/distance;
 	return true;
 }
 
