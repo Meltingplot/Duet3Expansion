@@ -103,13 +103,13 @@ public:
 	uint32_t GetDuration() const noexcept { return duration; }
 
 	// Get the initial speed
-	motioncalc_t CalcU() const noexcept { return distance/(motioncalc_t)duration - 0.5 * a * (motioncalc_t)duration; }
+	motioncalc_t CalcU() const noexcept;
 
 	// Get the initial speed assuming this move has no acceleration
-	motioncalc_t CalcLinearU() const noexcept { return distance/(motioncalc_t)duration; }
+	motioncalc_t CalcLinearU() const noexcept;
 
 	// Get the reciprocal of the initial speed assuming this move has no acceleration
-	motioncalc_t CalcLinearRecipU() const noexcept pre(a == 0.0) { return (motioncalc_t)duration/distance; }
+	motioncalc_t CalcLinearRecipU() const noexcept pre(a == 0.0);
 
 	// Get the acceleration
 	motioncalc_t GetA() const noexcept { return a; }
@@ -301,6 +301,86 @@ static inline motioncalc_t FastIntToMotionCalc(int32_t v) noexcept
 #else
 	return (motioncalc_t)v;
 #endif
+}
+
+// Fast conversion of a non-negative motioncalc_t to an unsigned integer, truncating towards zero exactly like the
+// C cast. The soft-float conversion is a subroutine call; here we extract the exponent and shift the mantissa
+// directly, which is bit-identical to (uint32_t)f for every f in [0, 2^32). Values >= 2^32 (for which the C cast
+// is undefined behaviour and cannot occur at our call sites, because the callers bound the result by the segment
+// duration) saturate to 0xFFFFFFFF. The sign bit is assumed clear; callers check that first (e.g. via signbit).
+static inline uint32_t FastMotionCalcToUint(motioncalc_t f) noexcept
+{
+#if (SAMC21 || RP2040) && !USE_DOUBLE_MOTIONCALC && !defined(__ECV__)
+# pragma GCC diagnostic push
+# pragma GCC diagnostic ignored "-Wstrict-aliasing"
+	const uint32_t b = *reinterpret_cast<const uint32_t*>(&f);
+# pragma GCC diagnostic pop
+	const uint32_t e = b >> 23;										// biased exponent (sign bit assumed clear, see above)
+	if (e < 127)
+	{
+		return 0;													// f < 1.0, including +0.0 and subnormals
+	}
+	const int32_t sh = (int32_t)e - (127 + 23);						// how far to shift the 24-bit mantissa to get the integer part
+	if (sh >= 9)
+	{
+		return 0xFFFFFFFFu;											// f >= 2^32: saturate (unreachable at our call sites)
+	}
+	const uint32_t mant = (b & 0x7FFFFFu) | 0x800000u;				// mantissa with the implicit leading 1
+	return (sh >= 0) ? mant << sh : mant >> (uint32_t)-sh;
+#else
+	return (uint32_t)f;
+#endif
+}
+
+// As FastMotionCalcToUint but for a signed result: truncate the magnitude towards zero and apply the sign,
+// bit-identical to (int32_t)f for every f with |f| < 2^31 (all values that occur at our call sites; the C cast
+// is undefined behaviour outside that range, which we saturate).
+static inline int32_t FastMotionCalcToInt(motioncalc_t f) noexcept
+{
+#if (SAMC21 || RP2040) && !USE_DOUBLE_MOTIONCALC && !defined(__ECV__)
+# pragma GCC diagnostic push
+# pragma GCC diagnostic ignored "-Wstrict-aliasing"
+	const uint32_t b = *reinterpret_cast<const uint32_t*>(&f);
+# pragma GCC diagnostic pop
+	const uint32_t e = (b >> 23) & 0xFFu;							// biased exponent without the sign bit
+	if (e < 127)
+	{
+		return 0;													// |f| < 1.0, including +/-0.0 and subnormals
+	}
+	const int32_t sh = (int32_t)e - (127 + 23);
+	if (sh >= 8)
+	{
+		return ((int32_t)b < 0) ? INT32_MIN : INT32_MAX;			// |f| >= 2^31: saturate (unreachable at our call sites)
+	}
+	const uint32_t mant = (b & 0x7FFFFFu) | 0x800000u;
+	const uint32_t mag = (sh >= 0) ? mant << sh : mant >> (uint32_t)-sh;
+	return ((int32_t)b < 0) ? -(int32_t)mag : (int32_t)mag;
+#else
+	return (int32_t)f;
+#endif
+}
+
+// Get the initial speed. The expression is unchanged from when these lived in the class body (including its
+// arithmetic promotions); only the integer-to-float conversions of 'duration' use the fast helper, which is
+// bit-identical to the plain cast, so the result is unchanged too. Defined here because the helpers above are
+// declared after the class body.
+inline motioncalc_t MoveSegment::CalcU() const noexcept
+{
+	const motioncalc_t durF = FastUintToMotionCalc(duration);
+	return distance/durF - 0.5 * a * durF;
+}
+
+// Get the initial speed assuming this move has no acceleration
+inline motioncalc_t MoveSegment::CalcLinearU() const noexcept
+{
+	return distance/FastUintToMotionCalc(duration);
+}
+
+// Get the reciprocal of the initial speed assuming this move has no acceleration.
+// Called from DriveMovement::NewSegment for every stepping constant-speed segment, so the fast conversion matters here.
+inline motioncalc_t MoveSegment::CalcLinearRecipU() const noexcept
+{
+	return FastUintToMotionCalc(duration)/distance;
 }
 
 // Normalise this segment by removing very small accelerations that cause problems, update t0, return true if it is linear
