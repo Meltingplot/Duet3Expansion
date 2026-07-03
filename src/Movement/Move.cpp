@@ -498,6 +498,10 @@ void Move::AppendDiagnostics(const StringRef& reply) noexcept
 	reply.lcatf("Moves scheduled %" PRIu32 ", hiccups %u (%.2f/%.2fms), segs %u, step errors %u (types 0x%x), maxLate %" PRIi32 " maxPrep %" PRIu32,
 					scheduledMoves, numHiccups, (double)ownDelayToReport, (double)totalDelayToReport, MoveSegment::NumCreated(),
 					numStepErrors, stepErrorTypesLogged.GetRaw(), DriveMovement::GetAndClearMaxStepsLate(), maxPrepareTime);
+#if SAMC21 || RP2040
+	reply.catf(", maxStepISR %.1fus (%" PRIu32 " cycles)", (double)((float)maxStepIsrCycles * (1000000.0f/(float)SystemCoreClock)), maxStepIsrCycles);
+	maxStepIsrCycles = 0;
+#endif
 	numHiccups = 0;
 	maxPrepareTime = 0;
 	numStepErrors = 0;
@@ -1293,6 +1297,9 @@ __attribute__((section(".time_critical")))
 #endif
 void Move::Interrupt() noexcept
 {
+#if SAMC21 || RP2040
+	const uint32_t sysTickAtEntry = SysTick->VAL;			// capture the CPU cycle counter so that we can track the worst-case execution time
+#endif
 #if SINGLE_DRIVER
 	if (dms[0].state >= DMState::firstMotionState)
 #else
@@ -1326,6 +1333,9 @@ void Move::Interrupt() noexcept
 					// Reschedule the next step interrupt. This time it should succeed if the hiccup time was long enough.
 					if (!ScheduleNextStepInterrupt())
 					{
+#if SAMC21 || RP2040
+						RecordStepIsrEnd(sysTickAtEntry);
+#endif
 						return;
 					}
 					// The hiccup wasn't long enough, so go round the loop again
@@ -1333,7 +1343,32 @@ void Move::Interrupt() noexcept
 			}
 		}
 	}
+#if SAMC21 || RP2040
+	RecordStepIsrEnd(sysTickAtEntry);
+#endif
 }
+
+#if SAMC21 || RP2040
+
+// Update maxStepIsrCycles from the SysTick count captured when Move::Interrupt was entered. SysTick counts down
+// from SysTick->LOAD at the CPU clock (FreeRTOS reloads it every millisecond) and a step ISR is far shorter than
+// that, so at most one wrap needs correcting. Reported by M122 and then reset, to measure the worst-case step ISR
+// execution time.
+__attribute__((section(".time_critical")))
+void Move::RecordStepIsrEnd(uint32_t sysTickAtEntry) noexcept
+{
+	uint32_t elapsed = sysTickAtEntry - SysTick->VAL;		// the counter counts down, so subtract this way round
+	if ((int32_t)elapsed < 0)
+	{
+		elapsed += SysTick->LOAD + 1;						// the counter wrapped (at most once)
+	}
+	if (elapsed > maxStepIsrCycles)
+	{
+		maxStepIsrCycles = elapsed;
+	}
+}
+
+#endif
 
 void Move::SetDriveStepsPerMm(size_t drive, float val)
 {
