@@ -1298,7 +1298,7 @@ __attribute__((section(".time_critical")))
 void Move::Interrupt() noexcept
 {
 #if SAMC21 || RP2040
-	const uint32_t sysTickAtEntry = SysTick->VAL;			// capture the CPU cycle counter so that we can track the worst-case execution time
+	const uint32_t sysTickAtEntry = (SysTick->VAL & SysTick_VAL_CURRENT_Msk);			// capture the CPU cycle counter so that we can track the worst-case execution time
 #endif
 #if SINGLE_DRIVER
 	if (dms[0].state >= DMState::firstMotionState)
@@ -1357,11 +1357,8 @@ void Move::Interrupt() noexcept
 __attribute__((section(".time_critical")))
 void Move::RecordStepIsrEnd(uint32_t sysTickAtEntry) noexcept
 {
-	uint32_t elapsed = sysTickAtEntry - SysTick->VAL;		// the counter counts down, so subtract this way round
-	if ((int32_t)elapsed < 0)
-	{
-		elapsed += SysTick->LOAD + 1;						// the counter wrapped (at most once)
-	}
+	uint32_t now = (SysTick->VAL & SysTick_VAL_CURRENT_Msk);		// the counter counts down, so subtract this way round
+	uint32_t elapsed = ((sysTickAtEntry > now) ? sysTickAtEntry : sysTickAtEntry + (SysTick->LOAD & SysTick_LOAD_RELOAD_Msk) + 1) - now;
 	if (elapsed > maxStepIsrCycles)
 	{
 		maxStepIsrCycles = elapsed;

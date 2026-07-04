@@ -403,7 +403,11 @@ static inline motioncalc_t fastLimSqrtm(motioncalc_t f) noexcept
 // The square root itself is Qfplib's qfp_fsqrt (~67 clocks, RAM-resident, reached via fastSqrtf), which is much
 // faster than a 64-bit integer square root on these cores; the conversions on either side cost ~30 + ~22 clocks
 // against the qfp_fmul + two qfp_fadds (~200 clocks) that the float path spends around its identical sqrt call.
-static inline int64_t FixLimSqrt(int64_t sFix, uint32_t rShift) noexcept
+// Must be noinline with an explicit section: if left inline, GCC partial-inlines just the sFix <= 0 guard and
+// moves the body into a .part clone that does not inherit the caller's .time_critical placement, so the
+// conversions and the sqrt call execute from flash via veneers on every accelerating/decelerating step.
+__attribute__((noinline, section(".time_critical")))
+static int64_t FixLimSqrt(int64_t sFix, uint32_t rShift) noexcept
 {
 	if (sFix <= 0)
 	{
