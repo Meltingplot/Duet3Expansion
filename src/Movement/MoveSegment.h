@@ -215,13 +215,16 @@ inline bool IsPositive(motioncalc_t f) noexcept
 #endif
 }
 
-// Normalise this segment by removing very small accelerations that cause problems, update t0, return true if it is linear
-// Called only from DriveMovement::NewSegment. Speed critical, hence inline and the rather unusual behaviour.
-// Returns:
-//  true if the segment is constant speed, with t0 = time from start of segment at which the distance would be/will be/would have been zero
-//  false if the segment has acceleration or deceleration, with t0 = time from start of segment at which the speed would have been/will be/would be zero
-inline bool MoveSegment::NormaliseAndCheckLinear(motioncalc_t distanceCarriedForwards, motioncalc_t& t0) noexcept
+// Core of NormaliseAndCheckLinear below: decide whether a segment is to be treated as constant speed and compute the
+// corresponding t0, without modifying anything. Written once, so that NormaliseAndCheckLinear and
+// DriveMovement::PrepareShadowChunk (which works on a copy of the segment fields, because the segment may still be
+// modified before it executes) compute bit-identical results from a single copy of this code.
+// Returns 0 if the segment has usable acceleration or deceleration, with t0 = time from start of segment at which the speed would have been/will be/would be zero;
+//         1 if it is constant speed, with t0 = time from start of segment at which the distance would be/will be/would have been zero;
+//         2 if it is to be treated as constant speed (t0 as for 1) because its tiny acceleration would cause calculation problems.
+static inline unsigned int CheckLinearCore(motioncalc_t a, uint32_t duration, motioncalc_t distance, motioncalc_t distanceCarriedForwards, motioncalc_t& t0) noexcept
 {
+	unsigned int ret = 1;
 	if (IsNonZero(a))
 	{
 		// The move has acceleration or deceleration, but it may be small enough to cause problems with the calculations.
@@ -242,16 +245,29 @@ inline bool MoveSegment::NormaliseAndCheckLinear(motioncalc_t distanceCarriedFor
 		if (likely(fabsm(provisionalT0) <= 4 * (motioncalc_t)16777216.0))
 		{
 			t0 = provisionalT0;
-			return false;
+			return 0;
 		}
-
-		// The acceleration/deceleration is small enough to cause calculation problems, so change it to a linear move
-		a = (motioncalc_t)0.0;
+		ret = 2;												// the acceleration is small enough to cause calculation problems, so treat this as a linear move
 	}
 
 	// The move is constant speed
 	t0 = -distanceCarriedForwards * (motioncalc_t)duration/distance;
-	return true;
+	return ret;
+}
+
+// Normalise this segment by removing very small accelerations that cause problems, update t0, return true if it is linear
+// Called only from DriveMovement::NewSegment. Speed critical, hence inline and the rather unusual behaviour.
+// Returns:
+//  true if the segment is constant speed, with t0 = time from start of segment at which the distance would be/will be/would have been zero
+//  false if the segment has acceleration or deceleration, with t0 = time from start of segment at which the speed would have been/will be/would be zero
+inline bool MoveSegment::NormaliseAndCheckLinear(motioncalc_t distanceCarriedForwards, motioncalc_t& t0) noexcept
+{
+	const unsigned int ret = CheckLinearCore(a, duration, distance, distanceCarriedForwards, t0);
+	if (ret == 2)
+	{
+		a = (motioncalc_t)0.0;									// remove the tiny acceleration, so that the rest of the segment processing treats it as linear
+	}
+	return ret != 0;
 }
 
 // Release a MoveSegment
@@ -310,5 +326,23 @@ inline void MoveSegment::Merge(motioncalc_t p_distance, motioncalc_t p_a, Moveme
 	a += p_a;
 	nextAndFlags |= (p_flags.all & MovementFlags::FlagsMask);
 }
+
+// Prepare the movement parameters of upcoming segments outside the step ISR (see DriveMovement::PrepareShadowChunk).
+// Two classes of step ISR invocation are otherwise unbounded and can exceed MaxStepInterruptTime, provoking a hiccup:
+// a segment boundary whose first step is already due when it is reached (almost a whole step carried forward), and a run
+// of zero-step segments (produced in numbers by input shaping), each costing the full coefficient float maths just to be
+// skipped. This matters on boards that do the motion calculations in soft float, so it is enabled on the SAMC21 (no FPU);
+// other boards compile exactly the code they did before. May be predefined (e.g. -DUSE_SHADOW_SEGMENTS=1) to override the default.
+#ifndef USE_SHADOW_SEGMENTS
+# if SAMC21 && !USE_DOUBLE_MOTIONCALC && !defined(__ECV__)
+#  define USE_SHADOW_SEGMENTS	(1)
+# else
+#  define USE_SHADOW_SEGMENTS	(0)
+# endif
+#endif
+
+// Change the 0 to 1 to compile in the shadow slot cache statistics (cacheHit/maxSkip/maxCacheSkip in M122).
+// Collecting them costs a few cycles at each segment boundary and about 50 bytes of RAM code.
+#define SHADOW_CACHE_DIAGNOSTICS	(USE_SHADOW_SEGMENTS && 0)
 
 #endif /* SRC_MOVEMENT_MOVESEGMENT_H_ */
