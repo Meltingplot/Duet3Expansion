@@ -1116,17 +1116,25 @@ void Move::AddLinearSegments(size_t drive, uint32_t startTime, const PrepParams&
 				{
 					const uint32_t now = StepTimer::GetMovementTimerTicks();
 					const int32_t overlap = endTime - startTime;
+					// We are about to discard this move entirely, which loses its steps and leaves our position behind the
+					// one the main board believes we are at. That is not a debug-only event, so report the first one of each
+					// diagnostics period unconditionally. M122 clears stepErrorTypesLogged, which re-arms the report; without
+					// that limit a run of overlapping moves would report once per move and flood the CAN console.
+					const bool report = !stepErrorTypesLogged.IsBitSet(3);
 					LogStepError(3);
 #if SAMC21 || RP2040
 					IrqRestore(oldFlags);
 #else
 					RestoreBasePriority(oldPrio);
 #endif
-					if (Platform::Debug(Module::Move))
+					if (report || Platform::Debug(Module::Move))
 					{
-						debugPrintf("overlaps executing seg by %" PRIi32 " while trying to add segment(s) starting at %" PRIu32 ", time now %" PRIu32 "\n",
-										overlap, startTime, now);
-						MoveSegment::DebugPrintList(tail);
+						debugPrintf("Dropping move for drive %u: overlaps executing seg by %" PRIi32 " while trying to add segment(s) starting at %" PRIu32 ", time now %" PRIu32 "\n",
+										(unsigned int)drive, overlap, startTime, now);
+						if (Platform::Debug(Module::Move))
+						{
+							MoveSegment::DebugPrintList(tail);
+						}
 					}
 					return;
 				}
