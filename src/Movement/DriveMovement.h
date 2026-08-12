@@ -101,7 +101,7 @@ private:
 	void FlushShadows() noexcept;						// drop all prepared slots; caller must be the step ISR or have it shut out
 #endif
 
-	void ReleaseSegments() noexcept;					// release the list of segments and set it to nullptr
+	void ReleaseSegments() noexcept;					// release the list of segments and set it to nullptr; caller must have left state below DMState::firstMotionState, so no interrupt guard is needed
 	bool LogStepError(uint8_t type, float info, const MoveSegment *seg) noexcept;	// report a step error
 
 	static int32_t maxStepsLate;

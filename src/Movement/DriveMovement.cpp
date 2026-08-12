@@ -918,20 +918,34 @@ pre(stepsTillRecalc == 0; segments != nullptr)
 	return true;
 }
 
+// Release the segment list and set it to nullptr, keeping the tail and hint caches consistent with it.
+// There is deliberately no interrupt guard here, because the caller has already gated the step ISR off this DM: its state
+// is below DMState::firstMotionState (idle from StopDriverFromRemote, stepError in Move::AddLinearSegments), and
+// Move::Interrupt, Move::StepDrivers and Move::ScheduleNextStepInterrupt all test for that, with StepDrivers dropping the
+// DM from the active list. So the ISR touches neither the segment list nor the shadow slots of this drive and there is
+// nothing to shut out. Detaching with a swap keeps the property the original code relied on: 'segments' reads as nullptr
+// from the moment the chain becomes ours, so it is never seen pointing at a segment already back on the free list.
+// Masking interrupts instead would be worse than useless here, since AddLinearSegments calls this from the Move task and
+// shutting the step interrupt out for the length of a chain walk is what provokes hiccups.
+void DriveMovement::ReleaseSegments() noexcept
+{
+#if USE_SHADOW_SEGMENTS
+	FlushShadows();										// the prepared slots refer to segments we are about to release
+#endif
+	MoveSegment *seg = nullptr;
+	std::swap(seg, const_cast<MoveSegment*&>(segments));
+	segmentsTail = nullptr;
+	segHint = nullptr;
+	MoveSegment::ReleaseAll(seg);
+}
+
 // If the driver is moving, stop it and release the segments. Caller will remote it from the active list and disable interrupts before calling this.
 void DriveMovement::StopDriverFromRemote() noexcept
 {
 	if (state != DMState::idle)
 	{
 		state = DMState::idle;
-#if USE_SHADOW_SEGMENTS
-		FlushShadows();										// the prepared slots refer to segments we are about to release
-#endif
-		MoveSegment *seg = nullptr;
-		std::swap(seg, const_cast<MoveSegment*&>(segments));
-		segmentsTail = nullptr;
-		segHint = nullptr;
-		MoveSegment::ReleaseAll(seg);
+		ReleaseSegments();
 	}
 }
 

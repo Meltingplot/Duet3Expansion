@@ -1055,6 +1055,21 @@ void Move::AddLinearSegments(size_t drive, uint32_t startTime, const PrepParams&
 	EnableDrive(drive);
 
 	DriveMovement& dm = dms[drive];
+
+	// A DM that has latched a step error is gated off for good: Move::Interrupt, Move::StepDrivers and
+	// Move::ScheduleNextStepInterrupt all test state >= DMState::firstMotionState, StepDrivers drops it from the active
+	// list, and every MoveSegment::Release site is in the step ISR. So nothing will ever execute or release segments for
+	// this drive again. Appending to it anyway drains the free list, forces MoveSegment::Allocate down the operator new
+	// path on every call, and takes CoreAllocPermanent into heapTop - turning a single step error into an outOfMemory
+	// reset some three quarters of an hour later, long after the event that caused it. Drop the move instead, and let go
+	// of whatever is still queued. Reading dm.state unguarded is fine: if it latches just after this test we queue one
+	// more move's worth of segments, and the next call releases those too.
+	if (unlikely(dm.state == DMState::stepError))
+	{
+		dm.ReleaseSegments();
+		return;
+	}
+
 	MoveSegment *tail;
 
 	// We need to ensure that while we are amending the segment list, the step ISR doesn't start executing a segment that we are amending.
