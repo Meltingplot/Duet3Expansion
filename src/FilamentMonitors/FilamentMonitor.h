@@ -16,6 +16,13 @@
 #include <RTOSIface/RTOSIface.h>
 #include <Duet3Common.h>
 
+// Change the 0 to 1 to compile in the filament monitor timing diagnostics (the "Interrupt ... poll ... us" line in M122).
+// Collecting them costs two StepTimer::GetTimerTicks() calls per poll and two more per pin change interrupt. On the SAMC21
+// each of those disables interrupts and busy-waits for the timer read-sync, which shuts out the step interrupt; and because
+// the main task polls in a free-running loop, that adds up to a great deal of step interrupt latency. The numbers are also
+// wall-clock, so they include any preemption of the main task and are hard to interpret anyway.
+#define FILAMENT_MONITOR_TIMING_DIAGNOSTICS		0
+
 class CanMessageGeneric;
 class CanMessageCreateFilamentMonitor;
 class CanMessageDeleteFilamentMonitor;
@@ -119,8 +126,10 @@ private:
 	static uint32_t whenStatusLastSent;
 	static size_t firstDriveToSend;
 
+#if FILAMENT_MONITOR_TIMING_DIAGNOSTICS
 	static uint32_t minInterruptTime, maxInterruptTime;
 	static uint32_t minPollTime, maxPollTime;
+#endif
 
 	static constexpr uint32_t StatusUpdateInterval = 2000;				// how often we send status reports when there isn't a change
 	static constexpr uint32_t LiveStatusUpdateInterval = 250;			// how often we report live status

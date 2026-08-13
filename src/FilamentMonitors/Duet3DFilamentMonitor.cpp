@@ -98,7 +98,8 @@ Duet3DFilamentMonitor::PollResult Duet3DFilamentMonitor::PollReceiveBuffer(uint1
 	{
 		again = false;
 		const size_t writePointer = edgeCaptureWritePointer;				// capture volatile variable
-		const uint32_t now = StepTimer::GetTimerTicks();
+		// Only the two states that can time out need the current time. Reading the step timer costs a read-sync with
+		// interrupts disabled, so don't do it in waitingForStartBit, which is the state we are in almost all of the time.
 		switch (state)
 		{
 		case RxdState::waitingForStartBit:
@@ -149,7 +150,7 @@ Duet3DFilamentMonitor::PollResult Duet3DFilamentMonitor::PollReceiveBuffer(uint1
 					again = true;
 				}
 			}
-			else if (now - edgeCaptures[edgeCaptureReadPointer] > MaxBitLength)		// check for timeout
+			else if (StepTimer::GetTimerTicks() - edgeCaptures[edgeCaptureReadPointer] > MaxBitLength)	// check for timeout
 			{
 				edgeCaptureReadPointer = (edgeCaptureReadPointer + 1u) % EdgeCaptureBufferSize;
 				state = RxdState::errorRecovery2;
@@ -161,7 +162,7 @@ Duet3DFilamentMonitor::PollResult Duet3DFilamentMonitor::PollReceiveBuffer(uint1
 			// This state must time out because while we are in it, comparison of filament extruded is suspended
 			{
 				const uint32_t nibbleStartTime = edgeCaptures[lastBitChangeIndex];
-				if (now - nibbleStartTime > (13 * startBitLength)/2)
+				if (StepTimer::GetTimerTicks() - nibbleStartTime > (13 * startBitLength)/2)
 				{
 					// 6.5 bit times have passed since the start of the bit that preceded the current nibble, so we should have a complete nibble and the following stuffing bit
 					uint32_t samplePoint = (startBitLength * 3)/2;		// sampling time after the end of the start bit for bit 7 (MSB)
