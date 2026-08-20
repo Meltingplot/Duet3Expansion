@@ -39,6 +39,13 @@ uint32_t FilamentMonitor::minInterruptTime = 0xFFFFFFFF, FilamentMonitor::maxInt
 uint32_t FilamentMonitor::minPollTime = 0xFFFFFFFF, FilamentMonitor::maxPollTime = 0;
 #endif
 
+#if FILAMENT_MONITOR_ACTIVITY_DIAGNOSTICS
+uint32_t FilamentMonitor::spinCalls = 0;
+uint32_t FilamentMonitor::pollCalls = 0;
+uint64_t FilamentMonitor::activeCycles = 0;
+uint32_t FilamentMonitor::whenActivityReset = 0;
+#endif
+
 // Constructor
 FilamentMonitor::FilamentMonitor(uint8_t p_driver, unsigned int t) noexcept
 	: type(t), driver(p_driver), enableMode(0), lastStatus(FilamentSensorStatus::noDataReceived)
@@ -322,6 +329,10 @@ GCodeResult FilamentMonitor::CommonConfigure(const CanMessageGenericParser& pars
 // Currently, the status for all filament monitors (on expansion boards as well as on the main board) is checked by the main board, which generates any necessary events.
 /*static*/ void FilamentMonitor::Spin() noexcept
 {
+#if FILAMENT_MONITOR_ACTIVITY_DIAGNOSTICS
+	++spinCalls;											// count every call, so this doubles as a measure of the main loop rate
+#endif
+
 	// Decide whether there is anything to do before taking the read lock or setting up the CAN message. LockForReading costs
 	// two scheduler suspend/resume pairs plus a LockRecord allocation, which is the bulk of what this function costs when it
 	// has nothing to do. An interrupt only brings the poll forward once staticMinPollInterval has passed, because the Duet3D
@@ -349,6 +360,11 @@ GCodeResult FilamentMonitor::CommonConfigure(const CanMessageGenericParser& pars
 		}
 	}
 
+#if FILAMENT_MONITOR_ACTIVITY_DIAGNOSTICS
+	// The gate above is deliberately outside the measurement, so 'active' is the time we actually spend doing work
+	const uint32_t startMs = millis();
+	const uint32_t startVal = SysTick->VAL;					// counts down, reloaded every millisecond
+#endif
 	CanMessageBuffer buf;
 	auto msg = buf.SetupRequestMessageNoRid<CanMessageFilamentMonitorsStatusNew2>(CanInterface::GetCanAddress(), CanInterface::GetCurrentMasterAddress());
 	size_t slotIndex = 0;
@@ -363,6 +379,9 @@ GCodeResult FilamentMonitor::CommonConfigure(const CanMessageGenericParser& pars
 		{
 			if (filamentSensors[drv] != nullptr)
 			{
+#if FILAMENT_MONITOR_ACTIVITY_DIAGNOSTICS
+				++pollCalls;
+#endif
 #if FILAMENT_MONITOR_TIMING_DIAGNOSTICS
 				const uint32_t startTime = StepTimer::GetTimerTicks();
 #endif
@@ -440,6 +459,17 @@ GCodeResult FilamentMonitor::CommonConfigure(const CanMessageGenericParser& pars
 		}
 	}
 
+#if FILAMENT_MONITOR_ACTIVITY_DIAGNOSTICS
+	// Stop the clock before the CAN send, which can block for up to a second and would swamp the figure.
+	// Time increases as ms*reload + (reload - VAL), so the difference is (endMs - startMs)*reload + startVal - endVal.
+	// A tick landing between the two reads of a pair costs us one reload of error on that sample.
+	{
+		const uint32_t endVal = SysTick->VAL;
+		const uint32_t endMs = millis();
+		activeCycles += (endMs - startMs) * (SysTick->LOAD + 1) + startVal - endVal;
+	}
+#endif
+
 	uint32_t now;
 	if (   slotIndex != 0
 		&& (   forceSend
@@ -498,6 +528,19 @@ GCodeResult FilamentMonitor::CommonConfigure(const CanMessageGenericParser& pars
 				maxPollTime = maxInterruptTime = 0;
 #else
 				reply.lcat("=== Filament sensors ===");
+#endif
+#if FILAMENT_MONITOR_ACTIVITY_DIAGNOSTICS
+				{
+					const uint32_t nowMs = millis();
+					const uint32_t elapsed = nowMs - whenActivityReset;
+					const float activeMs = (float)activeCycles/(float)(SysTick->LOAD + 1);
+					reply.catf("\nspins %" PRIu32 ", polls %" PRIu32 " in %" PRIu32 "ms, active %.2fms (%.3f%%)",
+									spinCalls, pollCalls, elapsed, (double)activeMs,
+									(double)((elapsed == 0) ? 0.0 : 100 * activeMs/(float)elapsed));
+					spinCalls = pollCalls = 0;
+					activeCycles = 0;
+					whenActivityReset = nowMs;
+				}
 #endif
 				first = false;
 			}
