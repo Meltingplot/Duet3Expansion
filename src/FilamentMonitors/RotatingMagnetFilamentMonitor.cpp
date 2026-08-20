@@ -30,6 +30,8 @@ RotatingMagnetFilamentMonitor::RotatingMagnetFilamentMonitor(unsigned int extrud
 	  minimumExtrusionCheckLength(DefaultMinimumExtrusionCheckLength), checkNonPrintingMoves(false)
 {
 	switchOpenMask = (monitorType == 4) ? TypeMagnetV1SwitchOpenMask : 0;
+	minPollInterval = MinPollInterval;			// opt into the fast path gate in FilamentMonitor::Spin (see RotatingMagnetFilamentMonitor.h)
+	maxPollInterval = MaxPollInterval;
 	Init();
 }
 
