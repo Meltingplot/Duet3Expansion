@@ -23,6 +23,12 @@
 // wall-clock, so they include any preemption of the main task and are hard to interpret anyway.
 #define FILAMENT_MONITOR_TIMING_DIAGNOSTICS		0
 
+// Change the 0 to 1 to compile in the filament monitor activity diagnostics: how often Spin is called, how often it actually
+// polls a monitor, and how much time it spends doing it. Unlike the timing diagnostics above these are cheap - one increment
+// per call plus two SysTick->VAL reads per pass, all plain register or RAM accesses with no lock and no peripheral read-sync.
+// Set MaxPollInterval in RotatingMagnetFilamentMonitor to 0 to disable the poll throttling, so that the two can be compared.
+#define FILAMENT_MONITOR_ACTIVITY_DIAGNOSTICS	0
+
 class CanMessageGeneric;
 class CanMessageCreateFilamentMonitor;
 class CanMessageDeleteFilamentMonitor;
@@ -150,6 +156,14 @@ private:
 #if FILAMENT_MONITOR_TIMING_DIAGNOSTICS
 	static uint32_t minInterruptTime, maxInterruptTime;
 	static uint32_t minPollTime, maxPollTime;
+#endif
+
+#if FILAMENT_MONITOR_ACTIVITY_DIAGNOSTICS
+	static uint32_t spinCalls;											// how many times Spin has been called since the last report
+	static uint32_t pollCalls;											// how many monitor polls those calls actually did
+	static uint64_t activeCycles;										// accumulated time spent in Spin, in SysTick counts; 64-bit because
+																		// at 48MHz a 32-bit count wraps after only 89 seconds of active time
+	static uint32_t whenActivityReset;									// when we last reported and cleared the above
 #endif
 
 	static constexpr uint32_t StatusUpdateInterval = 2000;				// how often we send status reports when there isn't a change
