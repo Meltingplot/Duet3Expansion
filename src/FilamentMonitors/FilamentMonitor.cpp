@@ -30,6 +30,10 @@ ReadWriteLock FilamentMonitor::filamentMonitorsLock;
 FilamentMonitor *FilamentMonitor::filamentSensors[NumDrivers] = { 0 };
 uint32_t FilamentMonitor::whenStatusLastSent = 0;
 size_t FilamentMonitor::firstDriveToSend = 0;
+uint32_t FilamentMonitor::staticMaxPollInterval = NoMonitorsConfigured;
+uint32_t FilamentMonitor::staticMinPollInterval = 0;
+uint32_t FilamentMonitor::whenAnySpinRan = 0;
+volatile bool FilamentMonitor::anyInterruptSeen = false;
 #if FILAMENT_MONITOR_TIMING_DIAGNOSTICS
 uint32_t FilamentMonitor::minInterruptTime = 0xFFFFFFFF, FilamentMonitor::maxInterruptTime = 0;
 uint32_t FilamentMonitor::minPollTime = 0xFFFFFFFF, FilamentMonitor::maxPollTime = 0;
@@ -39,6 +43,37 @@ uint32_t FilamentMonitor::minPollTime = 0xFFFFFFFF, FilamentMonitor::maxPollTime
 FilamentMonitor::FilamentMonitor(uint8_t p_driver, unsigned int t) noexcept
 	: type(t), driver(p_driver), enableMode(0), lastStatus(FilamentSensorStatus::noDataReceived)
 {
+}
+
+// Recompute the intervals that the fast path in Spin uses. Caller must hold the write lock.
+// If any configured monitor has not opted into throttling we must never skip, so the result is 0.
+/*static*/ void FilamentMonitor::UpdateStaticPollInterval() noexcept
+{
+	uint32_t maxInterval = NoMonitorsConfigured;
+	uint32_t minInterval = NoMonitorsConfigured;
+	for (const FilamentMonitor *const fs : filamentSensors)
+	{
+		if (fs != nullptr)
+		{
+			if (fs->maxPollInterval == 0)
+			{
+				maxInterval = 0;										// this monitor wants polling every time, so nobody gets skipped
+				break;
+			}
+			if (maxInterval == NoMonitorsConfigured || fs->maxPollInterval < maxInterval)
+			{
+				maxInterval = fs->maxPollInterval;
+			}
+			if (minInterval == NoMonitorsConfigured || fs->minPollInterval < minInterval)
+			{
+				minInterval = fs->minPollInterval;
+			}
+		}
+	}
+
+	// Store the minimum first, so that a reader in Spin that sees a usable maximum always sees a matching minimum
+	staticMinPollInterval = (minInterval == NoMonitorsConfigured) ? 0 : minInterval;
+	staticMaxPollInterval = maxInterval;
 }
 
 // Default destructor
@@ -169,10 +204,12 @@ GCodeResult FilamentMonitor::CommonConfigure(const CanMessageGenericParser& pars
 
 	default:	// no sensor, or unknown sensor
 		reply.printf("Unknown filament monitor type %u", monitorType);
+		UpdateStaticPollInterval();				// we deleted the old monitor above, so this must be refreshed on this path too
 		return GCodeResult::error;
 	}
 
 	filamentSensors[p_driver] = fm;
+	UpdateStaticPollInterval();
 	return GCodeResult::ok;
 }
 
@@ -199,6 +236,7 @@ GCodeResult FilamentMonitor::CommonConfigure(const CanMessageGenericParser& pars
 
 	fm->Disable();					// detach the ISR before destroying the derived object
 	delete fm;
+	UpdateStaticPollInterval();
 	return GCodeResult::ok;
 }
 
@@ -252,6 +290,7 @@ GCodeResult FilamentMonitor::CommonConfigure(const CanMessageGenericParser& pars
 		fm->haveIsrStepsCommanded = true;
 		fm->lastIsrMillis = millis();
 	}
+	anyInterruptSeen = true;					// let Spin past the fast path gate
 #if FILAMENT_MONITOR_TIMING_DIAGNOSTICS
 	const uint32_t elapsedTime = StepTimer::GetTimerTicks() - startTime;
 	if (elapsedTime > maxInterruptTime)
@@ -274,6 +313,7 @@ GCodeResult FilamentMonitor::CommonConfigure(const CanMessageGenericParser& pars
 	fm->isrExtruderStepsCommanded = moveInstance->GetAccumulatedExtrusion(fm->driver, fm->isrWasPrinting);
 	fm->haveIsrStepsCommanded = true;
 	fm->lastIsrMillis = millis();
+	anyInterruptSeen = true;					// let Spin past the fast path gate
 }
 
 #endif
@@ -282,6 +322,33 @@ GCodeResult FilamentMonitor::CommonConfigure(const CanMessageGenericParser& pars
 // Currently, the status for all filament monitors (on expansion boards as well as on the main board) is checked by the main board, which generates any necessary events.
 /*static*/ void FilamentMonitor::Spin() noexcept
 {
+	// Decide whether there is anything to do before taking the read lock or setting up the CAN message. LockForReading costs
+	// two scheduler suspend/resume pairs plus a LockRecord allocation, which is the bulk of what this function costs when it
+	// has nothing to do. An interrupt only brings the poll forward once staticMinPollInterval has passed, because the Duet3D
+	// sensors signal on every edge, which is several times per word; staticMaxPollInterval is the backstop when nothing is
+	// arriving, so that the receive state machine timeouts, the overdue check and the periodic status report still happen.
+	// The intervals are plain aligned words written only under the write lock, so a stale read here costs at most one extra
+	// or one skipped poll. The test and the clear of anyInterruptSeen are not atomic, so an edge recorded in between is
+	// forgotten, which costs at most one interval and is absorbed by the depth of the edge capture buffer.
+	{
+		const uint32_t maxInterval = staticMaxPollInterval;
+		if (maxInterval == NoMonitorsConfigured)
+		{
+			return;
+		}
+		if (maxInterval != 0)
+		{
+			const uint32_t now = millis();
+			const uint32_t sinceLast = now - whenAnySpinRan;
+			if (sinceLast < maxInterval && !(anyInterruptSeen && sinceLast >= staticMinPollInterval))
+			{
+				return;
+			}
+			anyInterruptSeen = false;
+			whenAnySpinRan = now;
+		}
+	}
+
 	CanMessageBuffer buf;
 	auto msg = buf.SetupRequestMessageNoRid<CanMessageFilamentMonitorsStatusNew2>(CanInterface::GetCanAddress(), CanInterface::GetCurrentMasterAddress());
 	size_t slotIndex = 0;
@@ -399,6 +466,7 @@ GCodeResult FilamentMonitor::CommonConfigure(const CanMessageGenericParser& pars
 	{
 		DeleteObject(f);
 	}
+	UpdateStaticPollInterval();
 }
 
 // Return the status of the filament sensor for a drive

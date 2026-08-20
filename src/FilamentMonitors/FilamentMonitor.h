@@ -115,8 +115,16 @@ protected:
 		return lrintf(100 * f);
 	}
 
+	// The longest interval in milliseconds that this monitor may go unpolled, and the shortest interval between polls when
+	// its ISR is signalling. The default of 0 keeps the original behaviour of polling every time round the free-running main
+	// loop; a monitor type whose protocol is slow enough not to need that rate opts into the fast path gate at the top of
+	// Spin by setting these in its constructor.
+	uint32_t maxPollInterval = 0;
+	uint32_t minPollInterval = 0;
+
 private:
 	static void InterruptEntry(CallbackParameter param) noexcept;
+	static void UpdateStaticPollInterval() noexcept;					// recompute the fast path intervals; call with the write lock held
 
 #if SUPPORT_AS5601
 	static void AS5601VirtualInterruptEntry(CallbackParameter param) noexcept;
@@ -125,6 +133,13 @@ private:
 	static FilamentMonitor *filamentSensors[NumDrivers];
 	static uint32_t whenStatusLastSent;
 	static size_t firstDriveToSend;
+
+	// State for the fast path at the top of Spin
+	static constexpr uint32_t NoMonitorsConfigured = 0xFFFFFFFF;		// value of staticMaxPollInterval meaning there is nothing to poll at all
+	static uint32_t staticMaxPollInterval;								// 0 = never skip, NoMonitorsConfigured = always skip, else the interval in ms
+	static uint32_t staticMinPollInterval;								// shortest gap between interrupt-driven passes through the fast path
+	static uint32_t whenAnySpinRan;										// when the fast path last let a call through
+	static volatile bool anyInterruptSeen;								// set by any monitor's ISR, consumed by the fast path
 
 #if FILAMENT_MONITOR_TIMING_DIAGNOSTICS
 	static uint32_t minInterruptTime, maxInterruptTime;
