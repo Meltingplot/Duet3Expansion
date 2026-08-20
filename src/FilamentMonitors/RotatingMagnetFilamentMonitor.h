@@ -27,6 +27,16 @@ protected:
 	void GetLiveData(FilamentMonitorDataV2& data) const noexcept override;
 
 private:
+	// This sensor sends at 1kbit/s into a 64-entry edge capture buffer, and it signals an interrupt on every edge, which is
+	// about 14 edges per word. Polling on each of those costs several times as many scheduler critical sections as polling
+	// on a timer, for latency that nothing downstream observes. So stay interrupt driven but cap the rate at MinPollInterval,
+	// and fall back to MaxPollInterval when nothing is arriving. The sensor sends a word at most every 40ms
+	// (MinOutputIntervalTicks in its firmware) and a word takes 25ms, so 5ms gives eight polls per word period. The backstop
+	// is safe at 20ms only because the interrupt brings the poll forward whenever data is actually arriving: the ISR will not
+	// take a new extrusion snapshot until the previous one has been collected, and the next start bit is 40ms away.
+	static constexpr uint32_t MinPollInterval = 5;					// milliseconds; shortest gap between interrupt-driven polls
+	static constexpr uint32_t MaxPollInterval = 20;					// milliseconds; set to 0 to disable throttling altogether
+
 	static constexpr float DefaultMmPerRev = 25.1;
 	static constexpr float DefaultMinMovementAllowed = 0.6;
 	static constexpr float DefaultMaxMovementAllowed = 1.6;
