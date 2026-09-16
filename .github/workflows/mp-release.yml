@@ -133,13 +133,15 @@ jobs:
             echo "- Branch: \`$UPSTREAM_BRANCH\`, tag \`$VERSION\` at $(git -C ./Duet3Expansion rev-parse --short HEAD); upstream \`$UPSTREAM_BRANCH\` tip at build time $UPSTREAM"
             echo "- Toolchain: Arm GNU Toolchain 15.2.Rel1, top-level Makefile (bootloader linker scripts, CRC appended)"
             for lib in CANlib CoreN2G FreeRTOS RRFLibraries Qfplib-M0-full; do
-              echo "- $lib: \`$(git -C ./$lib rev-parse --abbrev-ref HEAD)\` ($(git -C ./$lib rev-parse --short HEAD))"
+              ref=$(git -C ./$lib rev-parse --abbrev-ref HEAD)
+              [ "$ref" = "HEAD" ] && ref="pinned"
+              echo "- $lib: \`$ref\` ($(git -C ./$lib rev-parse --short HEAD))"
             done
             for board in $BOARDS; do
               bin="./upload/Duet3Firmware_$board.bin"
               elf="./Duet3Expansion/$board/Duet3Firmware_$board.elf"
               text=$("${CROSS_COMPILE}size" "$elf" | awk 'NR==2 {print $1}')
-              crc=$(python3 -c "import sys; d=open(sys.argv[1], 'rb').read(); print('0x%08X' % int.from_bytes(d[-4:], 'little'))" "$bin")
+              crc=$(python3 -c "import sys; d=open(sys.argv[1], 'rb').read(); print('0x%08X' % int.from_bytes(d[-4:], 'big'))" "$bin")
               echo "- $board: appended CRC32 $crc, $(stat -c %s "$bin") bytes (text $text); reports as \`$board|$VERSION|<build date>\` in M122"
             done
             echo "- Not yet tested on hardware"
@@ -168,7 +170,7 @@ jobs:
           GH_TOKEN: ${{ github.token }}
           VERSION: ${{ steps.version.outputs.version }}
         run: |
-          gh release create "$GITHUB_REF_NAME" --prerelease --verify-tag \
+          gh release create "$GITHUB_REF_NAME" --repo "$GITHUB_REPOSITORY" --prerelease --verify-tag \
             --title "TOOL1LC + EXP1HCL $VERSION" \
             --notes-file ./notes.md \
             ./upload/*.bin ./upload/SHA256SUMS.txt
