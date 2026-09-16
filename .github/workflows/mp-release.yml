@@ -20,10 +20,10 @@ jobs:
       ARM_TOOLCHAIN: arm-gnu-toolchain-15.2.rel1-x86_64-arm-none-eabi
       UPSTREAM_BRANCH: 3.7-dev
       BOARDS: TOOL1LC EXP1HCL
-      # CANlib 3.7-dev tip ca1800a (Added C parameter to M569 message) does not compile:
-      # CanMessageGenericTables.h uses UINT32_param instead of UINT32_PARAM. Pinned to the
-      # commit before it; move back to 3.7-dev once that is fixed upstream.
-      CANLIB_REF: 4ce319398870a7d4c7ba2fd8dd7e314adc318cce
+      # The libraries come from the Meltingplot forks so that what ships is under our control;
+      # advance a fork's 3.7-dev deliberately, after building against it locally.
+      LIB_OWNER: Meltingplot
+      LIB_REF: 3.7-dev
     steps:
       - name: "Check out Duet3Expansion"
         uses: actions/checkout@v6
@@ -34,36 +34,36 @@ jobs:
       - name: "Check out CANlib"
         uses: actions/checkout@v6
         with:
-          repository: "Duet3D/CANlib"
-          ref: ${{ env.CANLIB_REF }}
+          repository: ${{ env.LIB_OWNER }}/CANlib
+          ref: ${{ env.LIB_REF }}
           path: "./CANlib"
 
       - name: "Check out CoreN2G"
         uses: actions/checkout@v6
         with:
-          repository: "Duet3D/CoreN2G"
-          ref: "3.7-dev"
+          repository: ${{ env.LIB_OWNER }}/CoreN2G
+          ref: ${{ env.LIB_REF }}
           path: "./CoreN2G"
 
       - name: "Check out FreeRTOS"
         uses: actions/checkout@v6
         with:
-          repository: "Duet3D/FreeRTOS"
-          ref: "3.7-dev"
+          repository: ${{ env.LIB_OWNER }}/FreeRTOS
+          ref: ${{ env.LIB_REF }}
           path: "./FreeRTOS"
 
       - name: "Check out RRFLibraries"
         uses: actions/checkout@v6
         with:
-          repository: "Duet3D/RRFLibraries"
-          ref: "3.7-dev"
+          repository: ${{ env.LIB_OWNER }}/RRFLibraries
+          ref: ${{ env.LIB_REF }}
           path: "./RRFLibraries"
 
       - name: "Check out Qfplib-M0-full"
         uses: actions/checkout@v6
         with:
-          repository: "Duet3D/Qfplib-M0-full"
-          ref: "3.7-dev"
+          repository: ${{ env.LIB_OWNER }}/Qfplib-M0-full
+          ref: ${{ env.LIB_REF }}
           path: "./Qfplib-M0-full"
 
       - name: "Read version"
