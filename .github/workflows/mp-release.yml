@@ -1,0 +1,174 @@
+name: Meltingplot release
+
+# Builds the TOOL1LC and EXP1HCL firmware from this repository and, for a tag named like the
+# firmware version (e.g. 3.7.0-rc.1+2-mp.5), publishes a GitHub pre-release with the binaries
+# attached. A manual run only builds and stores the binaries as workflow artifacts.
+
+on:
+  push:
+    tags:
+      - "*-mp.*"
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    runs-on: ubuntu-24.04
+    env:
+      ARM_TOOLCHAIN: arm-gnu-toolchain-15.2.rel1-x86_64-arm-none-eabi
+      UPSTREAM_BRANCH: 3.7-dev
+      BOARDS: TOOL1LC EXP1HCL
+      # CANlib 3.7-dev tip ca1800a (Added C parameter to M569 message) does not compile:
+      # CanMessageGenericTables.h uses UINT32_param instead of UINT32_PARAM. Pinned to the
+      # commit before it; move back to 3.7-dev once that is fixed upstream.
+      CANLIB_REF: 4ce319398870a7d4c7ba2fd8dd7e314adc318cce
+    steps:
+      - name: "Check out Duet3Expansion"
+        uses: actions/checkout@v6
+        with:
+          path: "./Duet3Expansion"
+          fetch-depth: 0
+
+      - name: "Check out CANlib"
+        uses: actions/checkout@v6
+        with:
+          repository: "Duet3D/CANlib"
+          ref: ${{ env.CANLIB_REF }}
+          path: "./CANlib"
+
+      - name: "Check out CoreN2G"
+        uses: actions/checkout@v6
+        with:
+          repository: "Duet3D/CoreN2G"
+          ref: "3.7-dev"
+          path: "./CoreN2G"
+
+      - name: "Check out FreeRTOS"
+        uses: actions/checkout@v6
+        with:
+          repository: "Duet3D/FreeRTOS"
+          ref: "3.7-dev"
+          path: "./FreeRTOS"
+
+      - name: "Check out RRFLibraries"
+        uses: actions/checkout@v6
+        with:
+          repository: "Duet3D/RRFLibraries"
+          ref: "3.7-dev"
+          path: "./RRFLibraries"
+
+      - name: "Check out Qfplib-M0-full"
+        uses: actions/checkout@v6
+        with:
+          repository: "Duet3D/Qfplib-M0-full"
+          ref: "3.7-dev"
+          path: "./Qfplib-M0-full"
+
+      - name: "Read version"
+        id: version
+        working-directory: ./Duet3Expansion
+        run: |
+          VERSION=$(sed -n 's/^#define VERSION[[:space:]]\+"\(.\+\)"$/\1/p' src/Version.h)
+          echo "Version.h: $VERSION"
+          echo "version=$VERSION" >> "$GITHUB_OUTPUT"
+          if [ "$GITHUB_REF_TYPE" = "tag" ] && [ "$GITHUB_REF_NAME" != "$VERSION" ]; then
+            echo "Tag $GITHUB_REF_NAME does not match VERSION $VERSION" >&2
+            exit 1
+          fi
+
+      - name: "Prepare CrcAppender"
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh release download -R Duet3D/CrcAppender --pattern "CrcAppender-linux-x64"
+          chmod +x ./CrcAppender-linux-x64
+          sudo mv ./CrcAppender-linux-x64 /usr/bin/CrcAppender
+
+      - name: "Set up ARM GCC"
+        run: |
+          curl -L -o "./$ARM_TOOLCHAIN.tar.xz" "https://developer.arm.com/-/media/Files/downloads/gnu/15.2.rel1/binrel/$ARM_TOOLCHAIN.tar.xz"
+          tar -xf "./$ARM_TOOLCHAIN.tar.xz"
+
+      - name: "Build firmware"
+        working-directory: ./Duet3Expansion
+        env:
+          CROSS_COMPILE: ${{ github.workspace }}/${{ env.ARM_TOOLCHAIN }}/bin/arm-none-eabi-
+        run: |
+          # The top-level Makefile includes one board makefile per invocation
+          for board in $BOARDS; do
+            make -j"$(nproc)" "$board"
+          done
+
+      - name: "Arrange files"
+        run: |
+          mkdir -p upload/maps
+          for board in $BOARDS; do
+            cp "./Duet3Expansion/$board/Duet3Firmware_$board.bin" ./upload/
+            cp "./Duet3Expansion/$board/Duet3Firmware_$board.map" ./upload/maps/
+          done
+          (cd ./upload && sha256sum *.bin > SHA256SUMS.txt && cat SHA256SUMS.txt)
+
+      - name: "Write release notes"
+        env:
+          VERSION: ${{ steps.version.outputs.version }}
+          CROSS_COMPILE: ${{ github.workspace }}/${{ env.ARM_TOOLCHAIN }}/bin/arm-none-eabi-
+        run: |
+          cd ./Duet3Expansion
+          git fetch -q https://github.com/Duet3D/Duet3Expansion.git "$UPSTREAM_BRANCH"
+          UPSTREAM=$(git rev-parse --short FETCH_HEAD)
+          BASE=$(git merge-base HEAD FETCH_HEAD)
+          UPSTREAM_VERSION=$(git show "$BASE:src/Version.h" | sed -n 's/^#define VERSION[[:space:]]\+"\(.\+\)"$/\1/p')
+          cd ..
+          {
+            echo "TOOL1LC and EXP1HCL firmware \`$VERSION\` — Meltingplot build of upstream Duet3Expansion \`$UPSTREAM_BRANCH\` ($(git -C ./Duet3Expansion rev-parse --short "$BASE"), version $UPSTREAM_VERSION)."
+            echo
+            echo "**Changes over upstream $UPSTREAM_VERSION**"
+            echo
+            git -C ./Duet3Expansion log --format='- %s' --no-merges "$BASE..HEAD" | grep -v '^- Version: ' || true
+            echo
+            echo "**Build**"
+            echo
+            echo "- Branch: \`$UPSTREAM_BRANCH\`, tag \`$VERSION\` at $(git -C ./Duet3Expansion rev-parse --short HEAD); upstream \`$UPSTREAM_BRANCH\` tip at build time $UPSTREAM"
+            echo "- Toolchain: Arm GNU Toolchain 15.2.Rel1, top-level Makefile (bootloader linker scripts, CRC appended)"
+            for lib in CANlib CoreN2G FreeRTOS RRFLibraries Qfplib-M0-full; do
+              echo "- $lib: \`$(git -C ./$lib rev-parse --abbrev-ref HEAD)\` ($(git -C ./$lib rev-parse --short HEAD))"
+            done
+            for board in $BOARDS; do
+              bin="./upload/Duet3Firmware_$board.bin"
+              elf="./Duet3Expansion/$board/Duet3Firmware_$board.elf"
+              text=$("${CROSS_COMPILE}size" "$elf" | awk 'NR==2 {print $1}')
+              crc=$(python3 -c "import sys; d=open(sys.argv[1], 'rb').read(); print('0x%08X' % int.from_bytes(d[-4:], 'little'))" "$bin")
+              echo "- $board: appended CRC32 $crc, $(stat -c %s "$bin") bytes (text $text); reports as \`$board|$VERSION|<build date>\` in M122"
+            done
+            echo "- Not yet tested on hardware"
+          } > notes.md
+          cat notes.md
+
+      - name: "Attach binaries"
+        uses: actions/upload-artifact@v7
+        with:
+          name: binaries
+          path: |
+            ./upload/*.bin
+            ./upload/SHA256SUMS.txt
+            ./notes.md
+          compression-level: 0
+
+      - name: "Attach symbols"
+        uses: actions/upload-artifact@v7
+        with:
+          name: symbols
+          path: ./upload/maps/*.map
+
+      - name: "Create release"
+        if: github.ref_type == 'tag'
+        env:
+          GH_TOKEN: ${{ github.token }}
+          VERSION: ${{ steps.version.outputs.version }}
+        run: |
+          gh release create "$GITHUB_REF_NAME" --prerelease --verify-tag \
+            --title "TOOL1LC + EXP1HCL $VERSION" \
+            --notes-file ./notes.md \
+            ./upload/*.bin ./upload/SHA256SUMS.txt
