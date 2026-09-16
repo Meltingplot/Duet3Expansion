@@ -141,7 +141,7 @@ jobs:
               bin="./upload/Duet3Firmware_$board.bin"
               elf="./Duet3Expansion/$board/Duet3Firmware_$board.elf"
               text=$("${CROSS_COMPILE}size" "$elf" | awk 'NR==2 {print $1}')
-              crc=$(python3 -c "import sys; d=open(sys.argv[1], 'rb').read(); print('0x%08X' % int.from_bytes(d[-4:], 'big'))" "$bin")
+              crc=$(python3 -c "import sys; d=open(sys.argv[1], 'rb').read(); print('0x%08X' % int.from_bytes(d[-4:], 'little'))" "$bin")
               echo "- $board: appended CRC32 $crc, $(stat -c %s "$bin") bytes (text $text); reports as \`$board|$VERSION|<build date>\` in M122"
             done
             echo "- Not yet tested on hardware"
