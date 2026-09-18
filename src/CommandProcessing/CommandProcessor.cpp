@@ -23,7 +23,7 @@
 #include <Hardware/NonVolatileMemory.h>
 #include "CustomCommandHandler.h"
 
-#if !RP2040
+#if SAME5x || SAMC21
 # include <hpl_user_area.h>
 #endif
 
@@ -53,6 +53,8 @@
 # include "LoadCellDiagnostics.h"
 #endif
 
+#if STM32	// this is not used yet
+#else
 // Check a value against the specified min and max parameters returning true if the value was outside limits
 static bool CheckMinMax(CanMessageGenericParser& parser, const StringRef& reply, char c, float val, const char *text) noexcept
 {
@@ -83,6 +85,7 @@ static bool CheckMinMax(CanMessageGenericParser& parser, const StringRef& reply,
 	}
 	return false;
 }
+#endif
 
 // Generate a test report
 static GCodeResult GenerateTestReport(const CanMessageGeneric &msg, const StringRef& reply) noexcept
