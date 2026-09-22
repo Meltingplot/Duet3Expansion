@@ -316,12 +316,14 @@ static bool watchdogCausedReboot = false;
 		task->Create(MainTask, "MAIN", nullptr, TaskPriority::SpinPriority);
 	}
 
+#ifndef DEBUG
 	// Initialise watchdog clock
 	WatchdogInit();
-#if STM32
+# if STM32
 	NVIC_EnableIRQ(IWDG_IRQn);		// enable the watchdog early warning interrupt
-#elif !RP2040
+# elif !RP2040
 	NVIC_EnableIRQ(WDT_IRQn);		// enable the watchdog early warning interrupt
+# endif
 #endif
 
 	StepTimer::Init();				// initialise the step pulse timer now because we use it for measuring task CPU usage
@@ -866,12 +868,13 @@ extern "C" [[noreturn]] void UpdateBootloaderTask(void *pvParameters) noexcept
 static ptrdiff_t GetHandlerFreeStack() noexcept
 {
 	const char * const ramend = (const char*)&_estack;
-	const char * stack_lwm = sysStackLimit;
+	const char * const limit = reinterpret_cast<const char*>(sysStackLimit);
+	const char * stack_lwm = limit;
 	while (stack_lwm < ramend && *stack_lwm == memPattern)
 	{
 		++stack_lwm;
 	}
-	return stack_lwm - sysStackLimit;
+	return stack_lwm - limit;
 }
 
 ptrdiff_t Tasks::GetNeverUsedRam() noexcept
