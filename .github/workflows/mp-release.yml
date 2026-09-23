@@ -1,6 +1,6 @@
 name: Meltingplot release
 
-# Builds the TOOL1LC and EXP1HCL firmware from this repository and, for a tag named like the
+# Builds the firmware for the boards in BOARDS from this repository and, for a tag named like the
 # firmware version (e.g. 3.7.0-rc.1+2-mp.5), publishes a GitHub pre-release with the binaries
 # attached. A manual run only builds and stores the binaries as workflow artifacts.
 
@@ -19,7 +19,7 @@ jobs:
     env:
       ARM_TOOLCHAIN: arm-gnu-toolchain-15.2.rel1-x86_64-arm-none-eabi
       UPSTREAM_BRANCH: 3.7-dev
-      BOARDS: TOOL1LC EXP1HCL
+      BOARDS: TOOL1LC EXP1HCL SZP
       # The libraries come from the Meltingplot forks so that what ships is under our control;
       # advance a fork's 3.7-dev deliberately, after building against it locally.
       LIB_OWNER: Meltingplot
@@ -122,7 +122,7 @@ jobs:
           UPSTREAM_VERSION=$(git show "$BASE:src/Version.h" | sed -n 's/^#define VERSION[[:space:]]\+"\(.\+\)"$/\1/p')
           cd ..
           {
-            echo "TOOL1LC and EXP1HCL firmware \`$VERSION\` — Meltingplot build of upstream Duet3Expansion \`$UPSTREAM_BRANCH\` ($(git -C ./Duet3Expansion rev-parse --short "$BASE"), version $UPSTREAM_VERSION)."
+            echo "${BOARDS// / + } firmware \`$VERSION\` — Meltingplot build of upstream Duet3Expansion \`$UPSTREAM_BRANCH\` ($(git -C ./Duet3Expansion rev-parse --short "$BASE"), version $UPSTREAM_VERSION)."
             echo
             echo "**Changes over upstream $UPSTREAM_VERSION**"
             echo
@@ -171,6 +171,6 @@ jobs:
           VERSION: ${{ steps.version.outputs.version }}
         run: |
           gh release create "$GITHUB_REF_NAME" --repo "$GITHUB_REPOSITORY" --prerelease --verify-tag \
-            --title "TOOL1LC + EXP1HCL $VERSION" \
+            --title "${BOARDS// / + } $VERSION" \
             --notes-file ./notes.md \
             ./upload/*.bin ./upload/SHA256SUMS.txt
