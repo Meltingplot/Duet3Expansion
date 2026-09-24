@@ -302,7 +302,12 @@ __attribute__((noinline)) bool DriveMovement::PrepareShadowChunk() noexcept
 			return false;									// a gap after a sliver: the normal path waits for the start time then, so don't span it
 		}
 
-		const int32_t netSteps = (int32_t)(snap.distance + dcf);	// exactly the netStepsThisSegment calculation in NewSegment
+		if (snap.next == nullptr)
+		{
+			return false;									// NewSegment snaps the last segment of an axis to a whole step, which the slot does not replicate
+		}
+
+		const int32_t netSteps = (int32_t)(snap.distance + dcf);	// exactly the netStepsThisSegment calculation in NewSegment for a segment with a successor
 
 		motioncalc_t sT0;
 		const bool segIsLinear = CheckLinearCore(snap.a, snap.duration, snap.distance, dcf, sT0);	// snap.a is a copy, so letting this normalise it does not touch the segment
@@ -488,7 +493,20 @@ MoveSegment *DriveMovement::NewSegment(uint32_t now) noexcept
 #endif
 
 		// Calculate the movement parameters
-		netStepsThisSegment = (int32_t)(seg->GetLength() + distanceCarriedForwards);
+		const motioncalc_t endPosition = seg->GetLength() + distanceCarriedForwards;
+		netStepsThisSegment = (int32_t)endPosition;
+
+		// An axis that is about to stop must end on a whole step, but the segment lengths carry float rounding error.
+		// This must be corrected here as well as in CalcNextStepTimeFull because the closed loop and zero-step skip paths never get there
+		if (seg->GetNext() == nullptr && !segmentFlags.isExtruder)
+		{
+			const int32_t roundedSteps = lrintf(endPosition);
+			if (fabsm(endPosition - (motioncalc_t)roundedSteps) < (motioncalc_t)0.05)
+			{
+				seg->AdjustLength((motioncalc_t)roundedSteps - endPosition);
+				netStepsThisSegment = roundedSteps;
+			}
+		}
 
 #if SUPPORT_PHASE_STEPPING || SUPPORT_CLOSED_LOOP
 		if (UsesPhaseStepping())
