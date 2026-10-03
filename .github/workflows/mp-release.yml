@@ -126,7 +126,7 @@ jobs:
             echo
             echo "**Changes over upstream $UPSTREAM_VERSION**"
             echo
-            git -C ./Duet3Expansion log --format='- %s' --no-merges "$BASE..HEAD" | grep -v '^- Version: ' || true
+            git -C ./Duet3Expansion log --format='- %s' --no-merges --full-history "$BASE..HEAD" -- $(git -C ./Duet3Expansion diff --name-only "$BASE" HEAD) | grep -v '^- Version: ' || true
             echo
             echo "**Build**"
             echo
