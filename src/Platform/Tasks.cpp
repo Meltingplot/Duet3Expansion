@@ -73,7 +73,7 @@ struct UF2_Block
 #if SAMC21
 // Reduce the size of the system stack below the default 1024 to save memory. When we set it to 512, M122 reported just 12 words unused, so try a higher value.
 // Need more stack if we call debugPrintf from the step ISR. 700 was not enough.
-# define SystemStackSize	(800)								// system stack size in bytes
+# define SystemStackSize	(200)								// system stack size in dwords (800 bytes)
 #endif
 
 #include <syscalls.h>
