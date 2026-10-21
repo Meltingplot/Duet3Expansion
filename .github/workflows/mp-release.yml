@@ -1,13 +1,14 @@
 name: Meltingplot release
 
 # Builds the firmware for the boards in BOARDS from this repository and, for a tag named like the
-# firmware version (e.g. 3.7.0-rc.1+2-mp.5), publishes a GitHub pre-release with the binaries
+# firmware version (e.g. 3.7.0+mp.5), publishes a GitHub pre-release with the binaries
 # attached. A manual run only builds and stores the binaries as workflow artifacts.
 
 on:
   push:
     tags:
-      - "*-mp.*"
+      - "*\\+mp.*"   # 3.7.0+mp.5
+      - "*.mp.*"     # 3.7.0-rc.2+1.mp.5, upstream version with build metadata
   workflow_dispatch:
 
 permissions:
