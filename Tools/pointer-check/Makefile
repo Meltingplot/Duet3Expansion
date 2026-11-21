@@ -4,7 +4,7 @@
 #   make check        build the boards with -g, then fail for each raw pointer that allowlist.txt does not name
 #   make scan         the same check on the ELF files that are already there, without building
 #   make update       build, then rewrite allowlist.txt with the pointers found (keeps the comments of existing entries)
-#   make selftest     check pointer-check.py against selftest/src/sample.cpp
+#   make selftest     check pointer-check.py against selftest/src/sample.cpp and selftest/src/no-pointers.cpp
 #
 # CONFIGS selects the boards, default those that the release workflow builds (BOARDS in .github/workflows/mp-release.yml).
 
@@ -25,7 +25,7 @@ CORE_FLAGS_m0plus := -mcpu=cortex-m0plus
 CORE_FLAGS_m4 := -mcpu=cortex-m4 -mfpu=fpv4-sp-d16 -mfloat-abi=hard
 CORE_FLAGS_m33 := -mcpu=cortex-m33 -mfpu=fpv5-sp-d16 -mfloat-abi=hard
 
-.PHONY: build check scan update selftest $(SELFTEST_CORES:%=selftest-%) clean
+.PHONY: build check scan update selftest $(SELFTEST_CORES:%=selftest-%) selftest-update clean
 
 # -B rebuilds every object, so none is left from a build without -g. DEBUG_FLAGS=-g on the command line replaces the
 # Makefile's DEBUG_FLAGS; DEBUG=1 would also add -Og -DDEBUG. -g changes only the debug sections, not the code
@@ -53,7 +53,17 @@ $(SELFTEST_CORES:%=selftest-%): selftest-%: build/selftest/sample-%.o
 	! $(CHECK) --root selftest $< > build/selftest/without-allowlist-$*.txt
 	grep -q 'error: new raw pointer that can be reseated: Sample::plain (int \*)' build/selftest/without-allowlist-$*.txt
 
-selftest: $(SELFTEST_CORES:%=selftest-%)
+# --update on a file without pointers must write the header and no entries; the core does not matter here
+build/selftest/no-pointers.o: selftest/src/no-pointers.cpp Makefile
+	@mkdir -p build/selftest
+	cd selftest && $(CROSS_COMPILE)g++ -std=c++20 $(CORE_FLAGS_m0plus) -mthumb -O3 -g -c src/no-pointers.cpp -o $(abspath $@)
+
+selftest-update: build/selftest/no-pointers.o
+	printf '# header\nSample::gone  # an entry of a pointer that no longer exists\n' > build/selftest/update.txt
+	$(CHECK) --root selftest --allowlist build/selftest/update.txt --update $<
+	printf '# header\n' | diff -u - build/selftest/update.txt
+
+selftest: $(SELFTEST_CORES:%=selftest-%) selftest-update
 	@echo "selftest passed"
 
 clean:
