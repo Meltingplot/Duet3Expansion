@@ -47,7 +47,6 @@ constexpr uint32_t FlashBlockSize = 0x00004000;					// the erase size we assume 
 constexpr uint32_t FlashBlockSize = 0x00004000;					// the erase size we assume for flash, and the bootloader size (16K)
 #elif STM32H5
 constexpr uint32_t FlashBlockSize = 0x00004000;					// the erase size we assume for flash, and the bootloader size (16K)
-# define FLASH_ADDR		FLASH_BASE_NS
 #elif RP2040
 constexpr uint32_t FlashBlockSize = 0x00001000;					// the erase size we assume for flash, and the bootloader size (4K)
 constexpr uint32_t MaxFirmwareSize = 200*1024;					// Max size of firmware we can flash
@@ -490,7 +489,7 @@ static FirmwareFlashErrorCode GetBlock(uint32_t startingOffset, uint32_t& fileSi
 					if (response.fileOffset >= startingOffset && response.fileOffset <= startingOffset + bytesReceived)
 					{
 						const uint32_t bufferOffset = response.fileOffset - startingOffset;
-						const uint32_t bytesToCopy = min<uint32_t>(FlashBlockSize - bufferOffset, response.dataLength);
+						const uint32_t bytesToCopy = min<uint32_t>(min<uint32_t>(FlashBlockSize - bufferOffset, response.dataLength), sizeof(response.data));
 						//debugPrintf("About to store response off %d start %d %d bytes to offset %d\n", response.fileOffset, startingOffset, bytesToCopy, bufferOffset);
 						memcpy(blockBuffer + bufferOffset, response.data, bytesToCopy);
 						if (response.fileOffset + bytesToCopy > startingOffset + bytesReceived)
@@ -580,7 +579,7 @@ static FirmwareFlashErrorCode GetBootloaderBlock(uint8_t *blockBuffer)
 					if (response.fileOffset <= bytesReceived)
 					{
 						const uint32_t bufferOffset = response.fileOffset;
-						const uint32_t bytesToCopy = min<uint32_t>(FlashBlockSize - bufferOffset, response.dataLength);
+						const uint32_t bytesToCopy = min<uint32_t>(min<uint32_t>(FlashBlockSize - bufferOffset, response.dataLength), sizeof(response.data));
 						memcpy(blockBuffer + bufferOffset, response.data, bytesToCopy);
 						if (response.fileOffset + bytesToCopy > bytesReceived)
 						{
