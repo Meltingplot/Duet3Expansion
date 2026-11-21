@@ -1,0 +1,13 @@
+Outer::inner
+Sample::array
+Sample::callback
+Sample::handle
+Sample::list
+Sample::plain
+Sample::toConst
+Sample::toVolatile
+Sample::volatilePointer
+Wrapper::ptr
+globalPointer
+sample.cpp: (anonymous namespace)::anonymous
+sample.cpp: fileStatic

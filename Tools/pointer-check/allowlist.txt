@@ -1,0 +1,59 @@
+# Raw pointers that Duet3Expansion may keep although they can be reseated, see README.md. pointer-check.py fails for every
+# other one. One key per line, then a comment:
+#   Class::member, Namespace::variable   members and variables with a name that is unique in the firmware
+#   path/below/src.cpp: name             static variables, anonymous namespaces and anonymous classes
+#
+# The first list is the state of 3.7-dev at 3a8e565f in TOOL1LC, EXP1HCL and SZP, with the type as the comment. A new entry
+# needs the reason why the pointer is safe without a pointer class, e.g. which tasks read and write it.
+# "make update" rewrites the list from the firmware and keeps the comments of the entries that stay.
+CAN/CanInterface.cpp: can0dev                                  # CanDevice *
+CAN/CanInterface.cpp: canAsyncSenderTask                       # Task *
+CAN/CanInterface.cpp: canClockTask                             # Task *
+CAN/CanInterface.cpp: canReceiverTask                          # Task *
+CanMessageQueue::lastPendingMessage                            # CanMessageBuffer * volatile
+CanMessageQueue::pendingMessages                               # CanMessageBuffer * volatile
+CanMessageQueue::taskWaitingToGet                              # TaskBase * volatile
+ClosedLoop/ClosedLoop.cpp: dataTransmissionTask                # Task *
+ClosedLoop/ClosedLoop.cpp: encoderCalibrationTask              # Task *
+ClosedLoop::encoder                                            # Encoder *
+CommandProcessing/AccelerometerHandler.cpp: accelerometer      # LISAccelerometer *
+CommandProcessing/AccelerometerHandler.cpp: accelerometerTask  # Task *
+CommandProcessing/ScanningSensorHandler.cpp: inputMonitor      # InputMonitor * volatile
+CommandProcessing/ScanningSensorHandler.cpp: ldcTask           # Task *
+CommandProcessing/ScanningSensorHandler.cpp: sensor            # LDC1612 *
+DriveMovement::ShadowSlot::chainHead                           # MoveSegment const *
+DriveMovement::ShadowSlot::seg                                 # MoveSegment const * volatile
+DriveMovement::segHint                                         # MoveSegment * volatile
+DriveMovement::segments                                        # MoveSegment * volatile
+DriveMovement::segmentsTail                                    # MoveSegment * volatile
+Fans/FansManager.cpp: fans                                     # Fan * []
+FilamentMonitor::filamentSensors                               # FilamentMonitor * []
+Heating/Heat.cpp: Heat::heaters                                # Heater * []
+Heating/Heat.cpp: Heat::sensorsRoot                            # TemperatureSensor * volatile
+Heating/Heat.cpp: heaterTask                                   # Task *
+InputMonitor::monitorsList                                     # InputMonitor * volatile
+InputMonitor::next                                             # InputMonitor *
+LISAccelerometer::taskWaiting                                  # TaskHandle volatile
+LedStripManager::strips                                        # LedStripBase * []
+LinearCompositeEncoder::linEncoder                             # QuadratureEncoderPdec *
+LinearCompositeEncoder::shaftEncoder                           # AbsoluteRotaryEncoder *
+LocalLedStrip::chunkBuffer                                     # uint8_t *
+Move::taskWaitingForMoveToComplete                             # TaskBase * volatile
+MoveSegment::freeList                                          # MoveSegment *
+Movement/Move.cpp: moveTask                                    # Task *
+Movement/StepperDrivers/TMC22xx.cpp: tmcTask                   # Task *
+PinDescription::pinNames                                       # char const *
+Platform/Tasks.cpp: mainTask                                   # TaskBase *
+Platform::asyncPorts                                           # AsyncSerial * []
+Platform::sharedI2C                                            # SharedI2CMaster * []
+Platform::sharedSpi                                            # SharedSpiDevice *
+StepTimer::callback                                            # TimerCallbackFunction
+StepTimer::next                                                # StepTimer *
+StepTimer::pendingList                                         # StepTimer * volatile
+TemperatureSensor::SensorTypeDescriptor::createFunction        # CreationFunction
+TemperatureSensor::SensorTypeDescriptor::next                  # SensorTypeDescriptor *
+TemperatureSensor::SensorTypeDescriptor::sensorTypeListRoot    # SensorTypeDescriptor *
+TemperatureSensor::SensorTypeDescriptor::sensorTypeName        # char const *
+TemperatureSensor::next                                        # TemperatureSensor *
+closedLoopInstance                                             # ClosedLoop *
+moveInstance                                                   # Move *

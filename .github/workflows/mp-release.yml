@@ -149,6 +149,18 @@ jobs:
           } > notes.md
           cat notes.md
 
+      - name: "Check for new raw pointers"
+        # Rebuilds the boards with -g and fails for every reseatable raw pointer that allowlist.txt does not name, so that
+        # nothing is uploaded or released. It runs after the steps that use the release build: its binaries are already in
+        # ./upload and the release notes have read its ELF files. -g changes only the debug sections, see
+        # Tools/pointer-check/README.md
+        working-directory: ./Duet3Expansion/Tools/pointer-check
+        env:
+          CROSS_COMPILE: ${{ github.workspace }}/${{ env.ARM_TOOLCHAIN }}/bin/arm-none-eabi-
+        run: |
+          make -s -j"$(nproc)" selftest
+          make -j"$(nproc)" check CONFIGS="$BOARDS"
+
       - name: "Attach binaries"
         uses: actions/upload-artifact@v7
         with:
