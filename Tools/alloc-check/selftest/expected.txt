@@ -1,0 +1,11 @@
+BoostedMalloc [basepri] -> malloc
+CallsHelperInCritical [critical] -> malloc
+FarJumpInRegion [suspended] -> malloc
+LockerMalloc [suspended] -> malloc
+MaskedNew [primask] -> operator new
+OutOfLineFree [suspended] -> free
+SuspendedCallback [suspended] -> indirect call
+SuspendedNew [suspended] -> operator new
+SwitchInRegion [suspended] -> malloc
+TestIrq_Handler [isr] -> malloc
+src/sample.cpp: StaticSuspended [suspended] -> malloc
