@@ -270,7 +270,7 @@ def main():
         with open(args.allowlist, 'w') as f:
             for line in header:
                 f.write(line + '\n')
-            width = max(len(k) for k in found)
+            width = max((len(k) for k in found), default=0)
             for key in sorted(found):
                 rel, line, type_name = found[key]
                 comment = allowed.get(key) or type_name

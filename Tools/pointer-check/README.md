@@ -35,7 +35,8 @@ pointers, and whose pointer is not const:
   report the allocator's `__malloc_free_list`, `__malloc_sbrk_start` and `malloc_chunk::next`; `errno.c` declares no pointer.
 
 `selftest/src/sample.cpp` has one example of each case. `make selftest` compiles it with `-O3`, as the board makefiles do, for
-each core of the boards: Cortex-M0+ (SAMC21), Cortex-M4 (SAME51) and Cortex-M33 (STM32H5).
+each core of the boards: Cortex-M0+ (SAMC21), Cortex-M4 (SAME51) and Cortex-M33 (STM32H5). `selftest/src/no-pointers.cpp` has
+none: `make selftest` runs `--update` on it, which must write an allowlist with the header and no entries.
 
 ## How it works
 
@@ -76,7 +77,7 @@ container of DuetSoftwareFramework has both: `firmware/build.sh shell`, then `ma
     make check CONFIGS=TOOL1LC      # only this board; entries of the others show up as notes
     make scan                       # check the ELF files that are already there, without building
     make update                     # build, then rewrite allowlist.txt from the firmware
-    make selftest                   # check pointer-check.py against selftest/src/sample.cpp
+    make selftest                   # check pointer-check.py against selftest/src/sample.cpp and no-pointers.cpp
 
 Each new pointer gives one line, in the format that compilers use:
 
