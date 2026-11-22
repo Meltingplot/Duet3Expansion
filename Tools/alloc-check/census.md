@@ -121,6 +121,8 @@ None of these allocates, so the check does not report them, and none is fixed he
   `Move.cpp:1306` ends early.
 - **B2, TOOL1LC: the same path inside `IrqSave` (`Move.cpp:1304`).** The Cortex-M0+ `vPortExitCritical` runs `cpsie i`
   (`ARM_CM0/port.c:803-812`), so interrupts are enabled again inside the region.
+
+  `make scan-unmask` finds B1 and B2 as calls through a register (`unmask-census.md`), because the putc of `debugPrintf` is one.
 - **B3, EXP1HCL: an SPI mutex inside a suspended region.** The AS5047D and MT6835 readings select the shared SPI device
   (`CN/SPI/SharedSpiDevice.h:20`, `Mutex::Take` with 0 ticks) inside the closed loop regions. There is no wait, FreeRTOS asserts only
   for a timeout other than 0 with the scheduler suspended (`queue.c:1682`), but the reading fails when another task holds the

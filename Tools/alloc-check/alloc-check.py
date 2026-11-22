@@ -1,14 +1,15 @@
 #!/usr/bin/env python3
 """Lists the paths from inside a protected region of Duet3Expansion to the heap, and fails for each one that allowlist.txt does
-not name. See README.md.
+not name. With --unmask, lists the places where a region that masks interrupts lifts its mask too early instead, and fails for
+each one that unmask-allowlist.txt does not name. See README.md.
 
 A protected region is code that runs while the scheduler is suspended (vTaskSuspendAll), inside a FreeRTOS critical section
 (vPortEnterCritical), with BASEPRI raised (msr BASEPRI_MAX), with PRIMASK set (cpsid i), or in an exception handler of the
 vector table. The check reads the machine code of the linked firmware with the objdump of the Arm GNU toolchain, follows the
 control flow of each function and the direct calls between functions, and reports each call inside a region from which the heap
-can be reached, and each call inside a region whose target it cannot see.
+(--unmask: an instruction that lifts the mask) can be reached, and each call inside a region whose target it cannot see.
 
-    alloc-check.py [--allowlist FILE] [--update] [--keys] [--verbose] [--root DIR] ELF...
+    alloc-check.py [--unmask] [--allowlist FILE] [--update] [--keys] [--verbose] [--root DIR] ELF...
 """
 import argparse
 import collections
@@ -49,6 +50,11 @@ CRITICAL = {'vPortEnterCritical': 1, 'vPortExitCritical': -1}
 PRIMITIVES = set(SUSPEND) | set(CRITICAL)
 KINDS = ('suspended', 'critical', 'basepri', 'primask')
 ZERO = (0, 0, 0, 0)
+# The end of a FreeRTOS critical section lifts its mask only when the nesting count drops to 0: vPortExitCritical calls
+# portENABLE_INTERRUPTS() then (FreeRTOS src/portable/GCC/ARM_CM7/r0p1/port.c:480-489, ARM_CM4F/port.c:492-499), which writes
+# BASEPRI 0 (vPortSetBASEPRI(0), portmacro.h:120) or, on the Cortex-M0+, clears PRIMASK. The check cannot see the value that it
+# writes to BASEPRI (the compiler tests the count and writes the same register), so it knows the function by name.
+EXIT_CRITICAL = 'vPortExitCritical'
 CAP = 3                                                         # the nesting depth that the analysis keeps apart
 
 COND = r'(?:eq|ne|cs|hs|cc|lo|mi|pl|vs|vc|hi|ls|ge|lt|gt|le|al)'
@@ -466,9 +472,10 @@ class Program:
             mixed.pop(name, None)
         return result, mixed
 
-    def reach(self, roots, stop=frozenset()):
+    def reach(self, roots, stop=frozenset(), primitives=False):
         """For each function that reaches one of the roots through direct calls, the shortest chain of names to it. The chains
-        do not pass through the functions in stop."""
+        do not pass through the functions in stop, nor through the region primitives unless primitives is set (xTaskResumeAll
+        does not allocate, but it ends with a critical section, tasks.c:4038)."""
         callers = collections.defaultdict(set)
         for f in self.funcs:
             for _, name, _ in f.calls:
@@ -481,15 +488,16 @@ class Program:
             if n in stop:
                 continue
             for caller in sorted(callers[n]):
-                if caller not in chains and caller not in PRIMITIVES:
+                if caller not in chains and (primitives or caller not in PRIMITIVES):
                     chains[caller] = [caller] + chains[n]
                     queue.append(caller)
         return chains
 
 
-def query(prog, names):
-    """For each function named, every heap function and every call through a register that it reaches through direct calls,
-    each with one chain (the census uses this to see everything that a region calls)."""
+def query(prog, names, is_target=is_heap, primitives=False):
+    """For each function named, every target (a heap function, or with --unmask a function that lifts a mask) and every call
+    through a register that it reaches through direct calls, each with one chain (the census uses this to see everything that a
+    region calls)."""
     calls = collections.defaultdict(set)
     for f in prog.funcs:
         for _, name, _ in f.calls:
@@ -503,14 +511,14 @@ def query(prog, names):
             chains, queue, hits = {start: [start]}, collections.deque([start]), []
             while queue:
                 n = queue.popleft()
-                if is_heap(n):
+                if is_target(n) and n != start:
                     hits.append(' -> '.join(short(c) for c in chains[n]))
                     continue
                 f = prog.by_name.get(n)
                 if f is not None and f.indirect and n not in prog.noreturn:
                     hits.append(' -> '.join(short(c) for c in chains[n]) + ' -> (through a register)')
                 for c in sorted(calls[n]):
-                    if c not in chains and c not in PRIMITIVES:
+                    if c not in chains and (primitives or c not in PRIMITIVES):
                         chains[c] = chains[n] + [c]
                         queue.append(c)
             lines.append(f'{start}: ' + ('nothing' if not hits else ''))
@@ -586,24 +594,75 @@ def locate(elf, addrs, addr2line, root):
     return result
 
 
-def scan(elf, root, tools):
-    """Returns {key: [(address, function, chain, source locations)]}, the program, and notes about what the check cannot see."""
-    prog = Program(elf, tools['objdump'], tools['nm'])
-    heap = {f.name for f in prog.funcs if is_heap(f.name)}
-    if 'malloc' not in heap:
-        sys.exit(f'error: {elf} has no malloc, so it is not a firmware that this check knows')
-    # The functions of the FreeRTOS kernel, from their source files
-    changers = [f for f in prog.funcs if prog.changes_state(f)]
-    where = locate(elf, [f.start for f in changers], tools['addr2line'], root)
-    kernel = {f.name for f in changers if any(loc.startswith('FreeRTOS' + os.sep) for _, loc in where.get(f.start, []))}
-    summaries, mixed = prog.summaries(kernel)
-    to_heap = prog.reach(heap)
-    # A function that does not return either resets the processor (vAssertCalled, SoftwareReset) or throws, and a throw
-    # allocates its exception (__cxa_allocate_exception), which the heap chains find. So the chains to calls through a register
-    # do not pass through such functions
-    to_indirect = prog.reach({f.name for f in prog.funcs if f.indirect and f.name not in prog.noreturn}, prog.noreturn)
-    found = collections.defaultdict(list)                       # (opener, kind, target) -> [(address, opener, chain)]
+def clears(f, slot):
+    """Whether f has an instruction that clears the mask of slot (2 BASEPRI, 3 PRIMASK): cpsie i, or msr with the constant 0."""
+    return any(what == 'flag' and detail == (slot, 'clear') for what, _, detail in f.ops)
 
+
+def unmask_roots(prog, summaries):
+    """The functions that lift a mask, for each mask slot: (direct, nesting, critical_slots). direct[slot] are the functions with
+    an instruction that clears the slot; nesting is EXIT_CRITICAL, which lifts the mask of a critical section only at nesting 0;
+    critical_slots are the slots that a critical section masks, from what vPortEnterCritical leaves raised (BASEPRI on the
+    Cortex-M4F and M7, PRIMASK on the Cortex-M0+)."""
+    critical_slots = {2}
+    enter = prog.by_name.get('vPortEnterCritical')
+    if enter is not None:
+        _, exits = prog.analyse(enter, summaries)
+        raised = {slot for st in exits for slot in (2, 3) if st[slot] > 0}
+        critical_slots = raised or critical_slots
+    direct = {slot: {f.name for f in prog.funcs if clears(f, slot) and f.name != EXIT_CRITICAL} for slot in (2, 3)}
+    nesting = {EXIT_CRITICAL} & set(prog.by_name)
+    return direct, nesting, critical_slots
+
+
+def unmask_findings(prog, kernel, summaries, to_indirect):
+    """(opener, kind, target) -> [(address, opener, chain)] for each place inside a region that masks interrupts where the mask
+    can be lifted before the region ends: a call that reaches an instruction that clears the mask (cpsie i, or msr with the
+    constant 0), a critical section that is not nested in one of the function's own and so ends with the mask lifted, a nested
+    clear in the function itself (chain None), or a call through a register. kind is basepri or primask, or critical for a
+    region that only a critical section of the function masks."""
+    direct, nesting, critical_slots = unmask_roots(prog, summaries)
+    to_direct = {slot: prog.reach(direct[slot], prog.noreturn, primitives=True) for slot in (2, 3)}
+    to_exit = prog.reach(nesting, prog.noreturn, primitives=True)
+    found = collections.defaultdict(list)
+    for f in prog.funcs:
+        if f.name in PRIMITIVES or f.name in kernel or not (prog.changes_state(f) or any(c in summaries for _, c, _ in f.calls)):
+            continue
+        states, _ = prog.analyse(f, summaries)
+        for k, st in enumerate(states):
+            what, _, detail = f.ops[k]
+            addr = f.insns[k][0]
+            for s in st:
+                for slot in (2, 3):
+                    own = s[slot] > 0                           # masked by a region of the function other than a critical section
+                    by_critical = s[1] > 0 and slot in critical_slots
+                    if not (own or by_critical):
+                        continue
+                    kind = KINDS[slot] if own else 'critical'
+                    chain = None
+                    if what in ('call', 'tail') and detail and detail not in summaries:
+                        if detail in to_direct[slot]:
+                            chain = to_direct[slot][detail]
+                        elif own and slot in critical_slots and (
+                                (s[1] <= 0 and detail in to_exit) or (s[1] == 1 and detail in nesting)):
+                            # a critical section that is not nested in one of the function's own, or the end of the outermost
+                            # of its own: it ends with the mask lifted
+                            chain = to_exit.get(detail, [detail])
+                        elif detail in to_indirect:
+                            found[(f.name, kind, 'indirect call')].append((addr, f.name, to_indirect[detail]))
+                        if chain is not None:
+                            found[(f.name, kind, short(chain[-1]))].append((addr, f.name, chain))
+                    elif what in ('icall', 'itail'):
+                        found[(f.name, kind, 'indirect call')].append((addr, f.name, []))
+                    elif what == 'flag' and detail == (slot, 'clear') and (s[slot] >= 2 or by_critical):
+                        found[(f.name, kind, short(f.name))].append((addr, f.name, None))
+    return found
+
+
+def heap_findings(prog, kernel, summaries, to_heap, to_indirect):
+    """(opener, kind, target) -> [(address, opener, chain)] for each call inside a region that reaches the heap or a call through
+    a register, and for each exception handler that does."""
+    found = collections.defaultdict(list)
     for f in prog.funcs:
         if f.name in PRIMITIVES or is_heap(f.name) or f.name in kernel or not (
                 prog.changes_state(f) or any(c in summaries for _, c, _ in f.calls)):
@@ -637,6 +696,30 @@ def scan(elf, root, tools):
                 found[(f.name, 'isr', target_name(to_heap[f.name]))].append((f.start, f.name, to_heap[f.name]))
             elif f.name in to_indirect:
                 found[(f.name, 'isr', 'indirect call')].append((f.start, f.name, to_indirect[f.name]))
+    return found
+
+
+def scan(elf, root, tools, unmask=False):
+    """Returns {key: [(address, function, chain, source locations)]}, the program, and notes about what the check cannot see."""
+    prog = Program(elf, tools['objdump'], tools['nm'])
+    heap = {f.name for f in prog.funcs if is_heap(f.name)}
+    if 'malloc' not in heap:
+        sys.exit(f'error: {elf} has no malloc, so it is not a firmware that this check knows')
+    # The functions of the FreeRTOS kernel, from their source files
+    changers = [f for f in prog.funcs if prog.changes_state(f)]
+    where = locate(elf, [f.start for f in changers], tools['addr2line'], root)
+    kernel = {f.name for f in changers if any(loc.startswith('FreeRTOS' + os.sep) for _, loc in where.get(f.start, []))}
+    summaries, mixed = prog.summaries(kernel)
+    # A function that does not return either resets the processor (vAssertCalled, SoftwareReset) or throws, and a throw
+    # allocates its exception (__cxa_allocate_exception), which the heap chains find. So the chains to calls through a register
+    # do not pass through such functions
+    to_indirect = prog.reach({f.name for f in prog.funcs if f.indirect and f.name not in prog.noreturn}, prog.noreturn)
+    if unmask:
+        # An exception handler is not a region of its own here: it runs at its priority, which a lower BASEPRI or PRIMASK does
+        # not lower, so only the regions that it opens count
+        found = unmask_findings(prog, kernel, summaries, to_indirect)
+    else:
+        found = heap_findings(prog, kernel, summaries, prog.reach(heap), to_indirect)
 
     analysed = {f.name for f in prog.funcs if f.name not in kernel and prog.changes_state(f)}
     addrs = sorted({a for sites in found.values() for a, _, _ in sites} |
@@ -679,11 +762,15 @@ def read_allowlist(path):
 
 
 def describe(sites):
-    """The outermost source line of the first site, and every site with its inlined functions and its chain to the heap."""
+    """The outermost source line of the first site, and every site with its inlined functions and its chain to the heap (or to
+    the function that lifts the mask)."""
     first = sites[0][3][-1][1] if sites[0][3] else f'0x{sites[0][0]:x}'
     parts = []
     for addr, _, chain, loc in sites[:3]:
         inl = ' in '.join(f'{short(fn)} {fl}' for fn, fl in loc)
+        if chain is None:
+            parts.append(f'0x{addr:x} {inl}: clears the mask of an outer region itself')
+            continue
         via = ' -> '.join(short(c) for c in chain[:6]) + (' -> ...' if len(chain) > 6 else '')
         parts.append(f'0x{addr:x} {inl}: ' + (f'calls {via}' if via else 'calls through a register'))
     if len(sites) > 3:
@@ -695,12 +782,15 @@ def main():
     here = os.path.dirname(os.path.abspath(__file__))
     ap = argparse.ArgumentParser(description=__doc__.split('\n\n')[0])
     ap.add_argument('elf', nargs='+', help='linked firmware ELF files with debug information (DEBUG_FLAGS=-g)')
+    ap.add_argument('--unmask', action='store_true',
+                    help='find the places where a region that masks interrupts lifts its mask too early, instead of the heap')
     ap.add_argument('--allowlist', help='findings that may stay, default none')
     ap.add_argument('--update', action='store_true', help='rewrite the allowlist with the findings, keeping comments')
     ap.add_argument('--keys', action='store_true', help='print the key of every finding and nothing else')
     ap.add_argument('--verbose', action='store_true', help='also print the allowlisted findings and the notes')
     ap.add_argument('--query', action='append', metavar='FUNCTION',
-                    help='print what the function reaches (heap and calls through a register) and nothing else')
+                    help='print what the function reaches (heap or, with --unmask, the functions that lift a mask, and calls '
+                         'through a register) and nothing else')
     ap.add_argument('--root', default=os.path.normpath(os.path.join(here, '..', '..')),
                     help='the Duet3Expansion directory the firmware was compiled in, default ../..')
     prefix = os.environ.get('CROSS_COMPILE', 'arm-none-eabi-')
@@ -713,11 +803,17 @@ def main():
     if args.query:
         for elf in args.elf:
             print(f'== {os.path.basename(elf)}')
-            print('\n'.join(query(Program(elf, args.objdump, args.nm), args.query)))
+            prog = Program(elf, args.objdump, args.nm)
+            if args.unmask:
+                direct, nesting, _ = unmask_roots(prog, {})
+                lifts = direct[2] | direct[3] | nesting
+                print('\n'.join(query(prog, args.query, lambda n: n in lifts, primitives=True)))
+            else:
+                print('\n'.join(query(prog, args.query)))
         return 0
     found, notes = collections.defaultdict(list), []
     for elf in args.elf:
-        result, elf_notes = scan(elf, root, tools)
+        result, elf_notes = scan(elf, root, tools, args.unmask)
         for key, sites in result.items():
             found[key].extend(sites)
         notes += [f'note: {os.path.basename(elf)}: {n}' for n in elf_notes]
@@ -743,7 +839,14 @@ def main():
     new = sorted(set(found) - set(allowed))
     for key in new:
         first, text = describe(found[key])
-        if key.endswith('-> indirect call'):
+        if args.unmask and key.endswith('-> indirect call'):
+            print(f'{first}: error: call through a register inside a region that masks interrupts: {key}: {text}. Make sure '
+                  f'that its targets do not lift the mask (no FreeRTOS call, no cpsie i, no BASEPRI 0) and add the key to '
+                  f'{args.allowlist or "the allowlist"} with the reason')
+        elif args.unmask:
+            print(f'{first}: error: interrupts unmasked inside a protected region: {key}: {text}. Make the call after the '
+                  f'region, or add the key to {args.allowlist or "the allowlist"} with the reason')
+        elif key.endswith('-> indirect call'):
             print(f'{first}: error: call through a register inside a protected region: {key}: {text}. Make sure that its '
                   f'targets do not reach the heap and add the key to {args.allowlist or "the allowlist"} with the reason')
         else:

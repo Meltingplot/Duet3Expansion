@@ -1,5 +1,6 @@
-// The names that alloc-check.py knows, for the selftest: the region primitives of FreeRTOS, the heap functions of
-// Duet3Expansion's src/libc/nano-mallocr.c, and the instructions that CoreN2G's Core.h and CoreIO.h use to mask interrupts.
+// The names that alloc-check.py knows, for the selftest: the region primitives of FreeRTOS, two FreeRTOS API functions for the
+// unmask check, the heap functions of Duet3Expansion's src/libc/nano-mallocr.c, and the instructions that CoreN2G's Core.h and
+// CoreIO.h use to mask interrupts.
 // HAS_BASEPRI is 1 for the cores that have BASEPRI (Cortex-M4 of the SAME51), 0 for the Cortex-M0+ of the SAMC21.
 // runtime.cpp defines the functions; they do nothing useful, the selftest only reads their machine code.
 
@@ -15,6 +16,8 @@ extern "C"
 	long xTaskResumeAll() noexcept;
 	void vPortEnterCritical() noexcept;
 	void vPortExitCritical() noexcept;
+	long xTaskGenericNotify() noexcept;
+	void vTaskGenericNotifyGiveFromISR() noexcept;
 	void *malloc(size_t n) noexcept;
 	void free(void *p) noexcept;
 }
@@ -27,6 +30,7 @@ static inline __attribute__((always_inline)) uint32_t GetPrimask() noexcept
 }
 
 static inline __attribute__((always_inline)) void DisableIrq() noexcept { __asm volatile ("cpsid i" ::: "memory"); }
+static inline __attribute__((always_inline)) void EnableIrq() noexcept { __asm volatile ("cpsie i" ::: "memory"); }
 static inline __attribute__((always_inline)) void SetPrimask(uint32_t v) noexcept { __asm volatile ("msr primask, %0" :: "r" (v) : "memory"); }
 
 #if defined(__ARM_ARCH_7M__) || defined(__ARM_ARCH_7EM__)

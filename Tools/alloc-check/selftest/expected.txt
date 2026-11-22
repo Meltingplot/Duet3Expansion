@@ -1,7 +1,9 @@
+BoostedCallback [basepri] -> indirect call
 BoostedMalloc [basepri] -> malloc
 CallsHelperInCritical [critical] -> malloc
 FarJumpInRegion [suspended] -> malloc
 LockerMalloc [suspended] -> malloc
+MaskedCallback [primask] -> indirect call
 MaskedNew [primask] -> operator new
 OutOfLineFree [suspended] -> free
 SuspendedCallback [suspended] -> indirect call
