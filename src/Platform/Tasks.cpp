@@ -1140,9 +1140,17 @@ void Tasks::Diagnostics(const StringRef& reply) noexcept
 // It doesn't try to allocate from the free list maintained by malloc, only from virgin memory.
 void *Tasks::AllocPermanent(size_t sz, std::align_val_t align) noexcept
 {
+#if RP2040
 	__malloc_lock(nullptr);
+#else
+	GetMallocMutex();					// our own malloc takes this mutex, so we must take it too. Newlib's __malloc_lock does nothing here.
+#endif
 	void * const ret = CoreAllocPermanent(sz, align);
+#if RP2040
 	__malloc_unlock(nullptr);
+#else
+	ReleaseMallocMutex();
+#endif
 	return ret;
 }
 
