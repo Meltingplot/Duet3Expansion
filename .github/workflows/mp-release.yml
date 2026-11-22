@@ -161,6 +161,17 @@ jobs:
           make -s -j"$(nproc)" selftest
           make -j"$(nproc)" check CONFIGS="$BOARDS"
 
+      - name: "Check for heap use inside protected regions"
+        # Fails for every path from code that runs with the scheduler suspended, in a critical section, with BASEPRI raised,
+        # with interrupts disabled or in an exception handler to the heap (or to a call through a register) that allowlist.txt
+        # does not name. It reads the -g ELF files that the step before has built, see Tools/alloc-check/README.md
+        working-directory: ./Duet3Expansion/Tools/alloc-check
+        env:
+          CROSS_COMPILE: ${{ github.workspace }}/${{ env.ARM_TOOLCHAIN }}/bin/arm-none-eabi-
+        run: |
+          make -s selftest
+          make scan CONFIGS="$BOARDS"
+
       - name: "Attach binaries"
         uses: actions/upload-artifact@v7
         with:
