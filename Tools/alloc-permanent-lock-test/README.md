@@ -11,7 +11,7 @@ Duet3Expansion's `malloc` is `src/libc/nano-mallocr.c`, whose lock is `GetMalloc
 `Tasks.cpp:139-154`). It grows the heap with `_sbrk`, which raises `heapTop` up to `heapLimit` (`syscalls.h:49-64`).
 `Tasks::AllocPermanent` takes memory with `CoreAllocPermanent`, which lowers `heapLimit` down to `heapTop` (`syscalls.h:66-78`,
 "take the malloc mutex before calling this"). `MoveSegment` (`src/Movement/MoveSegment.h:83-84`) and `CanMessageBuffer`
-(`MessageBufferAlloc`, `Tasks.cpp:1234-1237`) use it.
+(`MessageBufferAlloc`, `Tasks.cpp:1242-1245`) use it.
 
 Up to 3.7-dev 9ac5016c, `AllocPermanent` called `__malloc_lock` and `__malloc_unlock`. In the RP2040 builds these are the
 functions at `Tasks.cpp:139` and `:157`. In all other builds they are newlib's, whose `__retarget_lock_acquire_recursive` is
@@ -44,6 +44,6 @@ The cases:
 ThreadSanitizer of g++ 13 stops with "unexpected memory mapping" on newer kernels, so the Makefile runs it under `setarch -R`.
 
 Results at 3.7-dev 9ac5016c with CoreN2G 3.7-dev 7d41892 (g++ 13.3, WSL):
-- Without the fix: plain and ASan "1 passed, 3 failed". TSan exits with 66: "data race" between `CoreAllocPermanent`
-  (`syscalls.h:72`) and `_sbrk` (`syscalls.h:55`) on `heapTop`.
+- Without the fix: plain and ASan "1 passed, 3 failed". TSan exits with 66: "data race" between `_sbrk` and
+  `CoreAllocPermanent`, on `heapTop` (`syscalls.h:55`, `:72`) or `heapLimit` (`:52`, `:76`), depending on the run.
 - With the fix: plain and ASan "4 passed, 0 failed". TSan passes.

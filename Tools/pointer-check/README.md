@@ -34,7 +34,8 @@ pointers, and whose pointer is not const:
   and the replacement for newlib's `errno.c`. `VENDORED` in `pointer-check.py` lists these folders. Without it the check would
   report the allocator's `__malloc_free_list`, `__malloc_sbrk_start` and `malloc_chunk::next`; `errno.c` declares no pointer.
 
-`selftest/src/sample.cpp` has one example of each case. `make selftest` compiles it with `-O3`, as the board makefiles do, for
+`selftest/src/sample.cpp` has one example of each case above except the last two (the libraries and `VENDORED`), for which
+the selftest has no file. `make selftest` compiles it with `-O3`, as the board makefiles do, for
 each core of the boards: Cortex-M0+ (SAMC21), Cortex-M4 (SAME51) and Cortex-M33 (STM32H5). `selftest/src/no-pointers.cpp` has
 none: `make selftest` runs `--update` on it, which must write an allowlist with the header and no entries.
 
@@ -89,7 +90,8 @@ The exit code is 1 if there is a new pointer.
 
 Use a pointer class that states how the pointer is shared. Until Duet3Expansion has such classes, add the key from the error
 message to `allowlist.txt` with the reason why the pointer is safe, e.g. that only one task reads and writes it. A static member
-is reported at its definition in the `.cpp` file, not at the declaration in the class. When a pointer goes away, the check
+is reported at its declaration or at its definition, whichever comes first by path and line; for `Foo.h` and `Foo.cpp` that is
+the definition in `Foo.cpp`. When a pointer goes away, the check
 prints a note, and `make update` removes it from the list.
 
 The Meltingplot release workflow (`.github/workflows/mp-release.yml`) runs `make check` for the boards that it releases
