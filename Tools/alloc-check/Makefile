@@ -31,8 +31,10 @@ CORE_FLAGS_m0plus := -mcpu=cortex-m0plus
 CORE_FLAGS_m4 := -mcpu=cortex-m4 -mfpu=fpv4-sp-d16 -mfloat-abi=hard
 EXPECTED_m0plus := grep -v '\[basepri\]' selftest/expected.txt
 EXPECTED_m4 := cat selftest/expected.txt
-# -O3 as in the board makefiles
-SELFTEST_FLAGS := -std=gnu++20 -mthumb -O3 -g -fno-exceptions -fno-rtti -nostdlib -nostartfiles -Wl,-e,Reset_Handler
+# -O3 as in the board makefiles. .far at 0x20000000 is out of the range of bl, so that the linker calls the functions there
+# through veneers
+SELFTEST_FLAGS := -std=gnu++20 -mthumb -O3 -g -fno-exceptions -fno-rtti -nostdlib -nostartfiles -Wl,-e,Reset_Handler \
+	-Wl,--section-start=.far=0x20000000
 
 .PHONY: build check scan scan-unmask update selftest $(SELFTEST_CORES:%=selftest-%) clean
 

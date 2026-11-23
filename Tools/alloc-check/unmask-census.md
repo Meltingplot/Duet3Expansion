@@ -1,18 +1,18 @@
 # Census of the unmask allowlist
 
-Each of the 10 entries of `unmask-allowlist.txt` was read in the code:
+Each of the 8 entries of `unmask-allowlist.txt` was read in the code:
 - for a call, every chain that its sites reach and the code of the region after the site;
 - for a call through a register, every target that the firmware sets, and what that target reaches.
 
 The verdict per entry is its comment in `unmask-allowlist.txt`; this file has the reasoning and the findings.
 
 - **Basis:** 3.7-dev at 5c02bb99 (2026-11-22) with RRFLibraries 3.7-dev 888b479, CoreN2G 3.7-dev 7d41892 and FreeRTOS 3.7-dev
-  980af10. Boards: TOOL1LC (5 entries), EXP1HCL (6) and SZP (2). TOOL1LC and SZP are SAMC21 (Cortex-M0+), EXP1HCL is SAME51
+  980af10. Boards: TOOL1LC (3 entries), EXP1HCL (6) and SZP (1). TOOL1LC and SZP are SAMC21 (Cortex-M0+), EXP1HCL is SAME51
   (Cortex-M4). Line numbers refer to that state.
-- **Counts:** 2 SUSPECT, 2 SAFE-GUARDED, 6 SAFE-NO-UNMASK.
+- **Counts:** 2 SUSPECT, 2 SAFE-GUARDED, 4 SAFE-NO-UNMASK.
 - **How:**
   - `alloc-check.py --unmask` lists each site with the shortest chain.
-  - The targets of the calls through a register are those that `census.md` names for the heap check (`census.md:85-108`).
+  - The targets of the calls through a register are those that `census.md` names for the heap check (`census.md:76-119`).
   - `--unmask --query` showed for each target whether it reaches a FreeRTOS call or `cpsie i`.
 - **Origin:** every entry is upstream code. Duet3D 3.7-dev 02000a7c has the same regions and calls.
 
@@ -41,21 +41,22 @@ The verdict per entry is its comment in `unmask-allowlist.txt`; this file has th
     `WakeAsyncSender` (`CAN/CanInterface.cpp:962-974`). In a task that is `Give`, in an interrupt `GiveFromISR` (`:795-805`).
   - So every `debugPrintf` in a task ends with a FreeRTOS critical section. `--unmask --query CanInterface::DebugPutc` shows
     `xTaskGenericNotify -> vPortExitCritical` on all three boards.
-- **Veneers.** On the SAMC21 boards the step functions run from RAM and are called through veneers (`census.md:89-92`). The check
-  does not resolve the veneer names, which stay mangled (`VENEER_RE`, `alloc-check.py:72`), so it reports such a call as a call
-  through a register. Their targets were checked with `--unmask --query`.
+- **Veneers.** On the SAMC21 boards the step functions run from RAM and are called through veneers (`census.md:96-99`). The check
+  follows a veneer to the function at the address in its literal (`Program.resolve` in `alloc-check.py`). Behind them it sees on
+  TOOL1LC two calls through a register that lift no mask:
+  - the `mov pc` switch of `CalcNextStepTimeFull` (`DriveMovement.cpp:785`), which stays inside the function (`census.md:97-98`);
+  - the Qfplib compare wrappers, which return with `bx r3` to the address that they copied from `lr` (Qfplib-M0-full
+    `qfplib-m0-full_gcc.S:364-392`).
 
 ## Findings
 
 | Entry | Boards | Verdict | Reason |
 |---|---|---|---|
-| `Move::AddLinearSegments [basepri] -> indirect call` | EXP1HCL | **SUSPECT** [open] (census.md B1) | Region: `ChangeBasePriority(NvicPriorityStep)` (`Movement/Move.cpp:1306`) to `RestoreBasePriority` (`:1349`).<br>- The sites `ScheduleFirstSegment` (`:1327`) and `Interrupt()` (`:1341`) reach `LogStepError` through `CalcNextStepTimeFull`.<br>- `LogStepError` prints on every step error (`DriveMovement.cpp:620-632`).<br>- The Move task runs the region (`Move.cpp:444`, `:477`), so the print wakes the CAN sender with `Give`. Its critical section ends with BASEPRI 0.<br>- After that, `moveInstance->LogStepError` (`DriveMovement.cpp:630`) and, on the `Interrupt()` path, the rest of `Move::Interrupt` run with the step interrupt enabled. That interrupt runs `Move::Interrupt` too (`TC0_Handler`, `census.md:89`). |
-| `Move::AddLinearSegments [primask] -> indirect call` | TOOL1LC | **SUSPECT** [open] (census.md B2) | Region: `IrqSave` (`Move.cpp:1304`) to `IrqRestore` (`:1347`). The sites are veneers: to `DriveMovement::NewSegment` (`:1327`, through `ScheduleFirstSegment`), to `StepTimer::ScheduleMovementCallbackFromIsr` (`:1339`) and to `Move::Interrupt` (`:1341`). `NewSegment` and `Interrupt` reach the veneer to `LogStepError`, and its print reaches `vPortExitCritical` as above. On the Cortex-M0 that runs `cpsie i`, so the rest of the region runs with interrupts enabled. `ScheduleMovementCallbackFromIsr` reaches only the veneer to `GetTimerTicksWhenInterruptsDisabled` |
+| `Move::AddLinearSegments [basepri] -> indirect call` | EXP1HCL | **SUSPECT** [open] (census.md B1) | Region: `ChangeBasePriority(NvicPriorityStep)` (`Movement/Move.cpp:1306`) to `RestoreBasePriority` (`:1349`).<br>- The sites `ScheduleFirstSegment` (`:1327`) and `Interrupt()` (`:1341`) reach `LogStepError` through `CalcNextStepTimeFull`.<br>- `LogStepError` prints on every step error (`DriveMovement.cpp:620-632`).<br>- The Move task runs the region (`Move.cpp:444`, `:477`), so the print wakes the CAN sender with `Give`. Its critical section ends with BASEPRI 0.<br>- After that, `moveInstance->LogStepError` (`DriveMovement.cpp:630`) and, on the `Interrupt()` path, the rest of `Move::Interrupt` run with the step interrupt enabled. That interrupt runs `Move::Interrupt` too (`TC0_Handler`, `census.md:96`). |
+| `Move::AddLinearSegments [primask] -> indirect call` | TOOL1LC | **SUSPECT** [open] (census.md B2) | Region: `IrqSave` (`Move.cpp:1304`) to `IrqRestore` (`:1347`). The sites `ScheduleFirstSegment` (`:1327`) and `Interrupt()` (`:1341`) reach `DriveMovement::NewSegment`, `CalcNextStepTimeFull` and `LogStepError`, which run from RAM; the check follows their veneers. The print in `LogStepError` reaches `vPortExitCritical` as above. On the Cortex-M0 that runs `cpsie i`, so the rest of the region runs with interrupts enabled. The other calls through a register on the way are the `mov pc` switch and the Qfplib wrappers (see Veneers) |
 | `Move::AddLinearSegments [basepri] -> vPortExitCritical` | EXP1HCL | SAFE-GUARDED | `Split` (`Move.cpp:1176`, `MoveSegment.h:297-299`) calls `MoveSegment::Allocate`, which allocates only with an empty free list (`MoveSegment.cpp:16-30`). `PrimeFreeList` (`Move.cpp:1119`, `MoveSegment.h:160`) fills the free list right before the region (`:1121-1123`). The region splits at most one segment and then breaks (`:1191`), and only the Move task allocates segments (census.md, SAFE-PRIMED) |
 | `Move::AddLinearSegments [primask] -> vPortExitCritical` | TOOL1LC | SAFE-GUARDED | As above |
-| `ClosedLoop::InstanceControlLoop [primask] -> indirect call` | EXP1HCL | SAFE-NO-UNMASK | `GetCurrentMotion` holds an `AtomicCriticalSectionLocker` (`DriveMovement.h:286`) around `NewSegment` (`:310`, `:318`). `NewSegment` can reach `LogStepError` and its print. The putc is `DebugPutc`, and its wake-up of the CAN sender does not touch PRIMASK on the Cortex-M4F, in a task or in an interrupt (see Ports). The interrupts stay disabled. The TMC task runs it (`census.md:103-107`) |
+| `ClosedLoop::InstanceControlLoop [primask] -> indirect call` | EXP1HCL | SAFE-NO-UNMASK | `GetCurrentMotion` holds an `AtomicCriticalSectionLocker` (`DriveMovement.h:286`) around `NewSegment` (`:310`, `:318`). `NewSegment` can reach `LogStepError` and its print. The putc is `DebugPutc`, and its wake-up of the CAN sender does not touch PRIMASK on the Cortex-M4F, in a task or in an interrupt (see Ports). The interrupts stay disabled. The TMC task runs it (`census.md:111-114`) |
 | `Move::PhaseStepControlLoop [primask] -> indirect call` | EXP1HCL | SAFE-NO-UNMASK | As above, through `GetCurrentMotion` (`Move.cpp:2606`); TMC task |
 | `Move::ProcessM970 [primask] -> indirect call` | EXP1HCL | SAFE-NO-UNMASK | As above, through `GetCurrentMotion` (`Move.cpp:2500`); main task |
 | `CanDevice::Interrupt [primask] -> indirect call` | all | SAFE-NO-UNMASK | `rxCallback` inside the locker (CoreN2G `CanDevice.cpp:1289-1290`) is `StepTimer::CanTimingMessageReceived` (`CAN/CanInterface.cpp:268`). It stores three values and reads the timer (`Movement/StepTimer.cpp:195-200`), and `--unmask --query` shows that it reaches nothing that lifts a mask |
-| `Platform::DoDiagnosticTest [primask] -> indirect call` | TOOL1LC, SZP | SAFE-NO-UNMASK | The veneer to `fastSqrtf` between `IrqDisable` and `IrqEnable` of the timing test (`Platform/Platform.cpp:1596-1602`). `fastSqrtf` reaches nothing that lifts a mask |
-| `StepTimer::ScheduleMovementCallbackFromIsr [primask] -> indirect call` | TOOL1LC | SAFE-NO-UNMASK | The veneer to `GetTimerTicksWhenInterruptsDisabled` inside the `AtomicCriticalSectionLocker` (`StepTimer.cpp:349-351`). It reads the timer and reaches nothing that lifts a mask |

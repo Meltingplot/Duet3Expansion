@@ -13,6 +13,13 @@ file has the reasoning and the findings.
 - **How:** the heap findings were read in the code. The targets of the calls through a register were read by an agent with file
   and line for each target, checked with `alloc-check.py --query` on each target, and spot-checked. One finding outside the
   allowlist came up on the way: P1 below.
+- **Veneers (later):** the check now follows a veneer to the function at the address in its literal. With that,
+  `Platform::DoDiagnosticTest [primask]` and `StepTimer::ScheduleMovementCallbackFromIsr [primask]` are no longer findings: their
+  only call through a register was a veneer. The other entries keep their verdicts. Behind the veneers the check now sees two
+  more calls through a register on TOOL1LC:
+  - the `mov pc` switch of `CalcNextStepTimeFull` (see Step timer);
+  - the Qfplib compare wrappers, which return with `bx r3` to the address that they copied from `lr` (Qfplib-M0-full
+    `qfplib-m0-full_gcc.S:364-392`).
 
 ## Verdicts
 
@@ -102,10 +109,11 @@ Each group shares one reason in `allowlist.txt`. CoreN2G is abbreviated CN, `CN/
   `AveragingFilter::CallbackFeedIntoFilter` (`AveragingFilter.h:84-91`) or `InputMonitor::CommonAnalogPortInterrupt`
   (`InputMonitor.cpp:112`, a task notification).
 - **Step functions** (`Move::AddLinearSegments` in the Move task, 3; `Move::PhaseStepControlLoop` and
-  `ClosedLoop::InstanceControlLoop` in the TMC task; `Move::ProcessM970` in main; `StepTimer::ScheduleMovementCallbackFromIsr`):
-  the veneers to the functions in RAM, and `debugPrintf` (`RepRapFirmware.cpp:30-39`), whose putc `CanInterface::DebugPutc`
-  (`CanInterface.cpp:962-974`) writes a ring buffer and wakes the CAN sender. See B1 and B2.
-- **`Platform::DoDiagnosticTest`** (main): the veneer to `fastSqrtf` in the timing test (`Platform.cpp:1594-1602`).
+  `ClosedLoop::InstanceControlLoop` in the TMC task; `Move::ProcessM970` in main): `debugPrintf` (`RepRapFirmware.cpp:30-39`),
+  whose putc `CanInterface::DebugPutc` (`CanInterface.cpp:962-974`) writes a ring buffer and wakes the CAN sender, and on TOOL1LC
+  the `mov pc` switch and the Qfplib wrappers behind the veneers (see Veneers above). See B1 and B2.
+- **`Platform::DoDiagnosticTest`** (main): the veneer to `fastSqrtf` in the timing test (`Platform.cpp:1594-1602`). No longer a
+  finding since the check follows veneers.
 - **Closed loop** (`ClosedLoop::InstanceDiagnostics`, `ProcessM569Point4`, `ResetError`, `SetClosedLoopEnabled`; EXP1HCL, main
   task and Move task): the `TakeReading` overrides of `AbsoluteRotaryEncoder` (AS5047D, MT6835), `RelativeEncoder` (quadrature
   PDEC) and `LinearCompositeEncoder`. See B3.
