@@ -46,7 +46,7 @@ The verdict per entry is its comment in `unmask-allowlist.txt`; this file has th
   TOOL1LC two calls through a register that lift no mask:
   - the `mov pc` switch of `CalcNextStepTimeFull` (`DriveMovement.cpp:785`), which stays inside the function (`census.md:97-98`);
   - the Qfplib compare wrappers, which return with `bx r3` to the address that they copied from `lr` (Qfplib-M0-full
-    `qfplib-m0-full_gcc.S:364-392`).
+    `qfplib-m0-full_gcc.S:364-405`).
 
 ## Findings
 

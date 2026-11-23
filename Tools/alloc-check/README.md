@@ -21,14 +21,16 @@ while the scheduler is running. With the scheduler suspended, or before it start
 - **The mutex is skipped.** Code that allocates or frees with the scheduler suspended runs `malloc` without the mutex. If a task
   of the same or a lower priority was preempted inside `malloc`, both work on the free list or the heap top at once. The task
   priorities are in `src/Platform/TaskPriorities.h:14-34`: main 1, heat 2, Move and CAN receiver 3, CAN sender 5.
-- **The guard is lifted.** If the scheduler is running, taking the mutex can switch tasks, and a switch restores the PRIMASK (and
-  on the SAME51 the BASEPRI) of the next task. Upstream added the assertion at `Tasks.cpp:146-151` for this (e847c690).
+- **The guard is lifted.** If the scheduler is running, taking the mutex runs a FreeRTOS critical section (FreeRTOS
+  `queue.c:1688`, `:1737`), also when the mutex is free; only a task that holds it already skips that (`queue.c:833-844`). Its
+  end runs `cpsie i` on the SAMC21 (`ARM_CM0/port.c:803-812`) and writes BASEPRI 0 on the SAME51 (`ARM_CM4F/port.c:492-500`).
+  Upstream added the assertion at `Tasks.cpp:146-151` for this (e847c690).
 
 In an exception handler the heap is never safe: the interrupted task may be inside `malloc`, and an ISR cannot take a mutex.
 
-`Tasks::AllocPermanent` (`Tasks.cpp:1141-1147`) takes memory from the top of the heap with CoreN2G's `CoreAllocPermanent`, which
+`Tasks::AllocPermanent` (`Tasks.cpp:1141-1155`) takes memory from the top of the heap with CoreN2G's `CoreAllocPermanent`, which
 needs the same mutex (CoreN2G `src/syscalls.h:66-78`). Up to 9ac5016c it called newlib's `__malloc_lock`, which takes nothing in
-these builds (see `census.md`, P1). The branch `fix/alloc-permanent-lock` makes it take the malloc mutex.
+these builds (see `census.md`, P1). #20 (6d621673) makes it take the malloc mutex.
 
 ### History of the class
 
@@ -42,8 +44,8 @@ these builds (see `census.md`, P1). The branch `fix/alloc-permanent-lock` makes 
   switched the heaters off through a `ReadWriteLock`; it now calls `Heat::SwitchOffAllLocalFromISR`.
 - Duet3Expansion e847c690 (C. Hammacher, 2026-08-14, "Fixed step interrupt guard being lifted by memory allocation"):
   `MoveSegment::PrimeFreeList` before the region of `Move::AddLinearSegments`, and the assertion in `GetMallocMutex`.
-- This fork (2026-11-22): K23, `ReadWriteLock` allocating its lock records with the scheduler suspended (RRFLibraries branch
-  `fix/alloc-outside-critical-section`), and P1 above.
+- This fork (2026-11-22): K23, `ReadWriteLock` allocating its lock records with the scheduler suspended (RRFLibraries #2), and
+  P1 above (#20).
 
 ## What counts
 
@@ -82,7 +84,8 @@ compiler errors.
 - An allocation that the compiler inlines into a function of another name together with the mutex functions.
 - Boards that it does not build: the default is those of the release workflow (TOOL1LC, EXP1HCL, SZP), the same as
   `Tools/pointer-check`.
-- Blocking calls inside a region: `census.md` lists those that the census found (B1-B3).
+- Other errors inside a region: `census.md` lists those that the census found (B1, B2: a print that lifts the mask, which
+  `scan-unmask` finds; B3: an SPI mutex taken with timeout 0 with the scheduler suspended).
 
 ## Interrupts unmasked inside a region (`--unmask`)
 
@@ -147,7 +150,8 @@ the selftest) and python3. The firmware build container of DuetSoftwareFramework
 `make selftest` compiles `selftest/src/sample.cpp` with `-O3` for the Cortex-M0+ and the Cortex-M4 and compares the findings with
 `selftest/expected.txt` (without the `[basepri]` case on the Cortex-M0+). `SwitchInRegion` and `FarJumpInRegion` cover the
 Thumb-1 jump tables and the far `bl`; without them the Cortex-M0+ run reports `SwitchInRegion` as a call through a register and
-misses `FarJumpInRegion`. The unmask cases have a list per core, `selftest/expected-unmask-m0plus.txt` and
+misses `FarJumpInRegion`. `SuspendedVeneer` and `MaskedVeneer` reach an allocation and a `cpsie i` through veneers of the
+linker (section `.far`). The unmask cases have a list per core, `selftest/expected-unmask-m0plus.txt` and
 `selftest/expected-unmask-m4.txt`: the runtime stand-ins model the Cortex-M0 port on the Cortex-M0+ and the Cortex-M4F port on
 the Cortex-M4, so a task notification with PRIMASK set is found only on the Cortex-M0+. `no-alloc.cpp` must give no finding of
 either check.

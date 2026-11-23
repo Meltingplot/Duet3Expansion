@@ -1,15 +1,19 @@
 # Census of the heap-in-region allowlist
 
-Each of the 90 entries of `allowlist.txt` was checked. For a heap finding: which task runs the region, whether the heap can
-really be reached there, and which tasks could be inside `malloc` at that moment. For a call through a register: every target
-that the firmware sets, and whether one of them reaches the heap. The verdict per entry is its comment in `allowlist.txt`; this
-file has the reasoning and the findings.
+Each of the 90 entries that `allowlist.txt` had at 9ac5016c was checked. For a heap finding: which task runs the region,
+whether the heap can really be reached there, and which tasks could be inside `malloc` at that moment. For a call through a
+register: every target that the firmware sets, and whether one of them reaches the heap. The verdict per entry is its comment
+in `allowlist.txt`; this file has the reasoning and the findings.
 
 - **Basis:** 3.7-dev at 9ac5016c (2026-11-22), RRFLibraries 3.7-dev 696a015, CoreN2G 3.7-dev 7d41892, FreeRTOS 3.7-dev 980af10,
   boards TOOL1LC (24 entries), EXP1HCL (72) and SZP (21). TOOL1LC and SZP are SAMC21 (Cortex-M0+), EXP1HCL is SAME51
   (Cortex-M4). All three are the CHX expansion boards, so every entry is a CHX path. Line numbers refer to that state.
-- **Counts:** 2 SUSPECT, 2 SAFE-PRIMED, 83 SAFE-NO-HEAP, 1 SAFE-NO-TARGET, 2 SAFE-RETURN. 71 of the entries are exception handlers,
-  53 of them one per sub-vector of the SAME51 (EIC, SERCOM, DMAC).
+- **Counts at 9ac5016c:** 2 SUSPECT, 2 SAFE-PRIMED, 83 SAFE-NO-HEAP, 1 SAFE-NO-TARGET, 2 SAFE-RETURN. 71 of the entries are
+  exception handlers, 53 of them one per sub-vector of the SAME51 (EIC, SERCOM, DMAC).
+- **Merged:** the fixes of K23 and P1 are in 3.7-dev 9402264a with RRFLibraries 3.7-dev 888b479. There the list has 86
+  entries, TOOL1LC 20, EXP1HCL 70 and SZP 18: 2 SAFE-PRIMED, 81 SAFE-NO-HEAP, 1 SAFE-NO-TARGET, 2 SAFE-RETURN, 71 of them
+  exception handlers. The two `ReadWriteLock` keys went away with RRFLibraries #2, and two SAFE-NO-HEAP keys with the veneer
+  fix (see Veneers below).
 - **How:** the heap findings were read in the code. The targets of the calls through a register were read by an agent with file
   and line for each target, checked with `alloc-check.py --query` on each target, and spot-checked. One finding outside the
   allowlist came up on the way: P1 below.
@@ -19,7 +23,7 @@ file has the reasoning and the findings.
   more calls through a register on TOOL1LC:
   - the `mov pc` switch of `CalcNextStepTimeFull` (see Step timer);
   - the Qfplib compare wrappers, which return with `bx r3` to the address that they copied from `lr` (Qfplib-M0-full
-    `qfplib-m0-full_gcc.S:364-392`).
+    `qfplib-m0-full_gcc.S:364-405`).
 
 ## Verdicts
 
@@ -41,13 +45,13 @@ a task of priority p or lower that was preempted inside `malloc` (see the README
 
 | Entry | Task(s) | Verdict | Fix |
 |---|---|---|---|
-| `ReadWriteLock::LockForReading`, `LockForWriting` (K23) | every task that takes a lock: heat (sensor and heater lists, `Heat.cpp:278`, `:306` in `Heat::TaskLoop`), CAN sender (`InputMonitor::AddStateChanges`, `InputMonitor.cpp:539`, from `CanInterface.cpp:1003`), main | SUSPECT: the heat task (2) or the CAN sender (5) against the main task (1) inside `malloc`, whenever the lock record freelist is empty | RRFLibraries `fix/alloc-outside-critical-section` 1e34289 |
+| `ReadWriteLock::LockForReading`, `LockForWriting` (K23) | every task that takes a lock: heat (sensor and heater lists, `Heat.cpp:278`, `:306` in `Heat::TaskLoop`), CAN sender (`InputMonitor::AddStateChanges`, `InputMonitor.cpp:539`, from `CanInterface.cpp:1003`), main | SUSPECT: the heat task (2) or the CAN sender (5) against the main task (1) inside `malloc`, whenever the lock record freelist is empty | fixed by RRFLibraries #2 (888b479); the keys went away |
 | `Move::AddLinearSegments [primask]` (TOOL1LC), `[basepri]` (EXP1HCL) `-> Tasks::AllocPermanent` | Move | SAFE-PRIMED | upstream e847c690 |
 
-- **K23.** The same code as in RepRapFirmware (RRFLibraries `RTOSIface.cpp:235-470`): the lock record is allocated after
-  `EnterTaskCriticalSection`. Built against the fixed RRFLibraries (with `LIBRARIES_DIR`), all three boards have exactly
-  the same entries minus the two `ReadWriteLock` keys. The host test of the fix is `Tools/lock-record-alloc-test` in the
-  RepRapFirmware fork (branch `fix/lock-record-alloc`).
+- **K23** (the number of the finding in the census of the RepRapFirmware copy). The same code as in RepRapFirmware
+  (RRFLibraries `RTOSIface.cpp:235-453`): the lock record is allocated after `EnterTaskCriticalSection`. Built against the
+  fixed RRFLibraries (with `LIBRARIES_DIR`), all three boards have exactly the same entries minus the two `ReadWriteLock` keys.
+  The host test of the fix is `Tools/lock-record-alloc-test` in the RepRapFirmware fork (RepRapFirmware #71).
 - **`Move::AddLinearSegments`.** `MoveSegment::PrimeFreeList` (`Move.cpp:1119`) puts a segment on the free list before
   `IrqSave` or `ChangeBasePriority` (`:1120-1124`). The region splits at most one segment (`:1176`, `MoveSegment::Split` in
   `MoveSegment.h:297-310`, which calls `MoveSegment::Allocate`) and then breaks out of the loop (`:1191`). Only `AddSegment` and
@@ -69,7 +73,7 @@ is `bx lr` in all three ELF files (TOOL1LC 0x22abc, EXP1HCL 0x39dfc, SZP 0x1b894
 - The check did not see it, because `Tasks::AllocPermanent` called no heap function: `__malloc_lock` was not a target, and
   `CoreAllocPermanent` is inline. It came up because the SAFE-PRIMED key of RepRapFirmware was missing here. `__malloc_lock`,
   `__malloc_unlock`, `Tasks::AllocPermanent` and `MessageBufferAlloc` are targets now.
-- Fix: branch `fix/alloc-permanent-lock`, `Tasks::AllocPermanent` takes `GetMallocMutex`, as RepRapFirmware's does
+- Fixed by #20 (6d621673): `Tasks::AllocPermanent` takes `GetMallocMutex` outside the RP2040 builds, as RepRapFirmware's does
   (`Tasks.cpp:323-329` there). Host test `Tools/alloc-permanent-lock-test`. With the fix the three boards have the same entries.
 - Since e539a216 (2023-01-18) and 6d52ab31 (2023-03-31), see the README. Upstream 3.7-dev has the same code.
 
