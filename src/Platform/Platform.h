@@ -133,6 +133,12 @@ namespace Platform
 	extern bool isPrinting;
 	extern uint32_t realTime;
 
+	// Debug buffer for messages from code that must not print, such as the step functions (DriveMovement::LogStepError).
+	// Build up a message in genericDebugBuffer, then set hasGenericDebug to true to indicate it is complete and ready to output.
+	// Spin prints it and sets hasGenericDebug false again.
+	extern String<StringLength256> genericDebugBuffer;
+	extern bool hasGenericDebug;
+
 	void Init();
 	void InitMinimal();
 	void Spin();

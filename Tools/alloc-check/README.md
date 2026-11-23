@@ -125,7 +125,7 @@ call that reaches both gives only the key of the function. The message is `inter
 **What it does not see**, in addition to the list above:
 - **The putc of `debugPrintf`.** `CanInterface::DebugPutc` wakes the CAN sender for the end of each message
   (`CAN/CanInterface.cpp:962-974`). It is reached through a register (a `function_ref`), so a print inside a region is a call
-  through a register and not a FreeRTOS call. B1 and B2 of `census.md` are found this way.
+  through a register and not a FreeRTOS call. B1 and B2 of `census.md` were found this way.
 - **A critical section that a caller holds.** A FreeRTOS call then leaves the mask in place, but the check reports it.
 - **When the mask is lifted.** A call that lifts it as the last thing in the region is found like one at its start.
 

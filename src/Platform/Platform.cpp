@@ -107,6 +107,8 @@ namespace Platform
 	UniqueIdBase uniqueId;
 	bool isPrinting = false;
 	uint32_t realTime = 0;
+	String<StringLength256> genericDebugBuffer;
+	bool hasGenericDebug = false;
 
 #if defined(EXP3HC) || defined(TOOL1LC) || defined(EXP1HCL)
 	static uint8_t boardVariant = 0;
@@ -984,6 +986,13 @@ void Platform::Spin()
 #if HAS_VOLTAGE_MONITOR || HAS_12V_MONITOR
 	static bool powered = false;
 #endif
+
+	// Check for generic debug
+	if (hasGenericDebug)
+	{
+		debugPrintf("%s", genericDebugBuffer.c_str());
+		hasGenericDebug = false;
+	}
 
 	if (deferredCommand != DeferredCommand::none && millis() - whenDeferredCommandRequested > 200)
 	{
