@@ -1,24 +1,33 @@
-# Places where a region that masks interrupts can lift its mask before it ends, that Duet3Expansion may keep, see README.md
-# ("Interrupts unmasked inside a region"). alloc-check.py --unmask fails for every other one. One key per line, then a comment:
+# Places where a region that masks interrupts can lift its mask before it ends or can block, that Duet3Expansion may keep, see
+# README.md ("Interrupts unmasked inside a region"). alloc-check.py --unmask fails for every other one. One key per line, then a
+# comment:
 #   Function [kind] -> target           kind: basepri, primask, or critical (a critical section of the function); target: the
 #                                       function that holds the instruction that lifts the mask, the function itself for a
-#                                       nested clear, or "indirect call"
+#                                       nested clear, "indirect call", or xPortTaskCanBlock for a call that can block
 #   path/below/src.cpp: Function [...]  static functions and functions in anonymous namespaces
 #
 # The list is the state of 3.7-dev at 5c02bb99 (RRFLibraries 3.7-dev 888b479, CoreN2G 3.7-dev 7d41892) in TOOL1LC, EXP1HCL and
-# SZP. Each comment gives the verdict of the census in unmask-census.md and the reason:
+# SZP, checked again at 7aa73f31 against two FreeRTOS versions:
+#   - 3.7-dev 980af10, whose vPortExitCritical clears the mask: the keys -> vPortExitCritical;
+#   - with Meltingplot/FreeRTOS PR #1, whose critical sections restore the mask and whose hooks assert xPortTaskCanBlock() where
+#     a task blocks: the keys -> xPortTaskCanBlock.
+# Once every build uses that FreeRTOS (DuetSoftwareFramework pin), "make update" removes the keys of the first one.
+# Each comment gives the verdict of the census in unmask-census.md and the reason:
 #   SUSPECT          the mask can be lifted while code that the region protects still runs; the fix branch is in brackets,
 #                    or "open"
 #   SAFE-GUARDED     the path to the instruction runs only under a run-time condition that the check does not evaluate, and the
 #                    condition excludes it inside the region
-#   SAFE-NO-UNMASK   a call through a register: every target the firmware sets was read and none lifts the mask
-# A new entry needs the reason why the mask stays in place. Better: make the call after the region.
+#   SAFE-NO-UNMASK   a call through a register: every target the firmware sets was read and none lifts the mask or blocks
+# A new entry needs the reason why the mask stays in place, or why the call cannot block there. Better: make the call after the
+# region.
 # "make update" rewrites the list from the firmware and keeps the comments of the entries that stay.
 CanDevice::Interrupt [primask] -> indirect call                        # SAFE-NO-UNMASK: rxCallback is StepTimer::CanTimingMessageReceived (CanInterface.cpp:268), which stores three values and reads the timer (StepTimer.cpp:195-200)
 ClosedLoop::InstanceControlLoop [primask] -> indirect call             # SAFE-NO-UNMASK: a step error in NewSegment writes its text through SafeVsnprintf, whose putc stores into Platform::genericDebugBuffer (EXP1HCL)
 Move::AddLinearSegments [basepri] -> indirect call                     # SAFE-NO-UNMASK (census.md B1, fixed in fix/step-error-print-in-region): a step error writes its text through SafeVsnprintf, whose putc stores into Platform::genericDebugBuffer; Platform::Spin prints it (EXP1HCL)
 Move::AddLinearSegments [basepri] -> vPortExitCritical                 # SAFE-GUARDED: Split allocates only with an empty free list (MoveSegment.cpp:16-30), which PrimeFreeList fills before the region (Move.cpp:1119); the region splits at most one segment
+Move::AddLinearSegments [basepri] -> xPortTaskCanBlock                 # SAFE-GUARDED: Split allocates only with an empty free list (MoveSegment.cpp:16-30), which PrimeFreeList fills before the region (Move.cpp:1119); the region splits at most one segment; GetMallocMutex asserts on that path anyway (Tasks.cpp:150) (EXP1HCL)
 Move::AddLinearSegments [primask] -> indirect call                     # SAFE-NO-UNMASK (census.md B2, fixed in fix/step-error-print-in-region): the same text under the step functions in RAM, whose veneers the check follows; also the mov pc switch of CalcNextStepTimeFull, the Qfplib compare wrappers and the returns of StringRef::printf and catf (TOOL1LC)
 Move::AddLinearSegments [primask] -> vPortExitCritical                 # SAFE-GUARDED: Split allocates only with an empty free list (MoveSegment.cpp:16-30), which PrimeFreeList fills before the region (Move.cpp:1119); the region splits at most one segment
+Move::AddLinearSegments [primask] -> xPortTaskCanBlock                 # SAFE-GUARDED: as Move::AddLinearSegments [basepri] -> xPortTaskCanBlock; GetMallocMutex asserts PRIMASK 0 (Tasks.cpp:148) (TOOL1LC)
 Move::PhaseStepControlLoop [primask] -> indirect call                  # SAFE-NO-UNMASK: a step error in NewSegment writes its text through SafeVsnprintf, whose putc stores into Platform::genericDebugBuffer (EXP1HCL)
 Move::ProcessM970 [primask] -> indirect call                           # SAFE-NO-UNMASK: a step error in NewSegment writes its text through SafeVsnprintf, whose putc stores into Platform::genericDebugBuffer (EXP1HCL)

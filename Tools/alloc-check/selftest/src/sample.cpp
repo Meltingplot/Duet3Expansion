@@ -1,6 +1,8 @@
 // Functions with a known answer for alloc-check.py, see ../../README.md. "make selftest" compiles and links this file with
 // runtime.cpp, with the firmware's compiler, -O3 and -g, for the Cortex-M0+ (SAMC21) and the Cortex-M4 (SAME51), and compares
-// the findings with ../expected.txt and ../expected-unmask-<core>.txt. Each function says whether the check must find it.
+// the findings with ../expected.txt and ../expected-unmask-<core>.txt. It builds them a second time with RESTORING_PORT, whose
+// critical sections restore the mask (runtime.cpp), and compares the findings with ../expected-unmask-<core>-restoring.txt.
+// Each function says whether the check must find it.
 
 #include "runtime.h"
 
@@ -194,7 +196,8 @@ TESTED void CallStatic() noexcept
 }
 
 // The cases of the unmask check (--unmask). runtime.cpp models the Cortex-M4F port of FreeRTOS on the Cortex-M4, whose critical
-// sections use BASEPRI, and the Cortex-M0 port on the Cortex-M0+, whose critical sections disable the interrupts
+// sections use BASEPRI, and the Cortex-M0 port on the Cortex-M0+, whose critical sections disable the interrupts. With
+// RESTORING_PORT, no critical section lifts a mask: the lifts below that end in vPortExitCritical are not found then
 
 #if HAS_BASEPRI
 // Found on the Cortex-M4: a FreeRTOS call with BASEPRI raised, whose critical section ends with BASEPRI 0
@@ -320,6 +323,59 @@ TESTED void NotifyInCritical() noexcept
 	vPortExitCritical();
 }
 
+// The cases of a call that can block inside a region (target xPortTaskCanBlock), which only the RESTORING_PORT build has. Without
+// RESTORING_PORT, the critical section of the take lifts the mask instead, as for BoostedNotify and MaskedNotify
+
+#if HAS_BASEPRI
+// Found on the Cortex-M4: a take with a timeout with BASEPRI raised (without RESTORING_PORT: -> vPortExitCritical)
+TESTED void BoostedTake() noexcept
+{
+	const uint32_t old = GetBasepri();
+	SetBasepriMax(0x50);
+	(void)xQueueSemaphoreTake(10);
+	SetBasepri(old);
+}
+#endif
+
+// Found: a take with a timeout with PRIMASK set (without RESTORING_PORT: -> vPortExitCritical on the Cortex-M0+, not found on
+// the Cortex-M4)
+TESTED void MaskedTake() noexcept
+{
+	const uint32_t flags = GetPrimask();
+	DisableIrq();
+	(void)xQueueSemaphoreTake(10);
+	SetPrimask(flags);
+}
+
+// Found with RESTORING_PORT: a take with a timeout inside a critical section of the function. Not found without it, as
+// NotifyInCritical
+TESTED void TakeInCritical() noexcept
+{
+	vPortEnterCritical();
+	(void)xQueueSemaphoreTake(10);
+	vPortExitCritical();
+}
+
+// Found as well: a take with timeout 0 with PRIMASK set, which cannot block. The check does not evaluate the argument, so such a
+// call needs an allowlist entry with the reason (without RESTORING_PORT: as MaskedTake)
+TESTED void MaskedPoll() noexcept
+{
+	const uint32_t flags = GetPrimask();
+	DisableIrq();
+	(void)xQueueSemaphoreTake(0);
+	SetPrimask(flags);
+}
+
+// Not found: the take after the region
+TESTED void TakeAfterMask() noexcept
+{
+	const uint32_t flags = GetPrimask();
+	DisableIrq();
+	selector = 19;
+	SetPrimask(flags);
+	(void)xQueueSemaphoreTake(10);
+}
+
 // Not found: a callee that saves and restores PRIMASK, as IrqSave and IrqRestore do
 TESTED void SaveRestoreHelper() noexcept
 {
@@ -368,9 +424,10 @@ extern "C" void Reset_Handler() noexcept
 	SuspendedCallback(); CallStatic(); SwitchInRegion(); FarJumpInRegion(); AllocateBeforeRegion(); ConditionalRegion(true);
 	AllocateAfterRestore(); SwitchOutsideRegion();
 #if HAS_BASEPRI
-	BoostedNotify(); BoostedLocker(); BoostedCritical(); BoostedCallback(); BoostedGiveFromIsr();
+	BoostedNotify(); BoostedLocker(); BoostedCritical(); BoostedCallback(); BoostedGiveFromIsr(); BoostedTake();
 #endif
 	MaskedNotify(); MaskedCritical(); MaskedCallback(); NestedEnable(); MaskedGiveFromIsr(); NotifyAfterMask(); NotifyInCritical();
+	MaskedTake(); TakeInCritical(); MaskedPoll(); TakeAfterMask();
 	MaskedSaveRestore(); SuspendedVeneer(); MaskedVeneer();
 	for (;;) { }
 }

@@ -1,13 +1,14 @@
 #!/usr/bin/env python3
 """Lists the paths from inside a protected region of Duet3Expansion to the heap, and fails for each one that allowlist.txt does
-not name. With --unmask, lists the places where a region that masks interrupts lifts its mask too early instead, and fails for
-each one that unmask-allowlist.txt does not name. See README.md.
+not name. With --unmask, lists the places where a region that masks interrupts lifts its mask too early or can block instead,
+and fails for each one that unmask-allowlist.txt does not name. See README.md.
 
 A protected region is code that runs while the scheduler is suspended (vTaskSuspendAll), inside a FreeRTOS critical section
 (vPortEnterCritical), with BASEPRI raised (msr BASEPRI_MAX), with PRIMASK set (cpsid i), or in an exception handler of the
 vector table. The check reads the machine code of the linked firmware with the objdump of the Arm GNU toolchain, follows the
 control flow of each function and the direct calls between functions, and reports each call inside a region from which the heap
-(--unmask: an instruction that lifts the mask) can be reached, and each call inside a region whose target it cannot see.
+(--unmask: an instruction that lifts the mask, or a place where the task blocks) can be reached, and each call inside a region
+whose target it cannot see.
 
     alloc-check.py [--unmask] [--allowlist FILE] [--update] [--keys] [--verbose] [--root DIR] ELF...
 """
@@ -53,8 +54,15 @@ ZERO = (0, 0, 0, 0)
 # The end of a FreeRTOS critical section lifts its mask only when the nesting count drops to 0: vPortExitCritical calls
 # portENABLE_INTERRUPTS() then (FreeRTOS src/portable/GCC/ARM_CM7/r0p1/port.c:480-489, ARM_CM4F/port.c:492-499), which writes
 # BASEPRI 0 (vPortSetBASEPRI(0), portmacro.h:120) or, on the Cortex-M0+, clears PRIMASK. The check cannot see the value that it
-# writes to BASEPRI (the compiler tests the count and writes the same register), so it knows the function by name.
+# writes to BASEPRI (the compiler tests the count and writes the same register), so it knows the function by name. The ports of
+# Meltingplot/FreeRTOS from PR #1 on restore the mask that the outermost critical section found instead; their
+# vPortExitCritical writes only a value that it loads from memory, and then the function lifts nothing (exit_restores).
 EXIT_CRITICAL = 'vPortExitCritical'
+# A task that blocks with a mask of its own or inside a critical section of its own cannot switch away: the context switch runs at
+# the lowest interrupt priority. The FreeRTOSConfig.h of Meltingplot/FreeRTOS from PR #1 on asserts xPortTaskCanBlock() in the
+# trace hooks where a task blocks, suspends or deletes itself, so a call inside such a region that reaches it can stop the
+# firmware in vAssertCalled. Firmware built with a FreeRTOS without these hooks has no such function, and no such finding.
+BLOCK = 'xPortTaskCanBlock'
 CAP = 3                                                         # the nesting depth that the analysis keeps apart
 
 COND = r'(?:eq|ne|cs|hs|cc|lo|mi|pl|vs|vc|hi|ls|ge|lt|gt|le|al)'
@@ -137,6 +145,7 @@ class Function:
         self.ops = []
         self.calls = []                                         # (index, callee, tail call)
         self.indirect = []                                      # indices of calls and jumps through a register
+        self.mask_writes = []                                   # (value, tested) of each msr to BASEPRI or PRIMASK, see msr_value
         index = {a: k for k, (a, _, _) in enumerate(self.insns)}
         it_left = 0
         for k, (addr, mn, ops) in enumerate(self.insns):
@@ -194,6 +203,7 @@ class Function:
             elif b == 'msr' and re.match(r'^(BASEPRI|BASEPRI_MAX|PRIMASK), ', ops, re.I):
                 reg, src = [x.strip() for x in ops.split(',', 1)]
                 value = prog.msr_value(self, k, src)
+                self.mask_writes.append((value, prog.msr_tested(self, k, src)))
                 slot = 2 if reg.upper().startswith('BASEPRI') else 3
                 if value is None:
                     prog.unknown_msr.append((self.name, addr))
@@ -377,6 +387,19 @@ class Program:
             if re.match(r'^' + reg + r'\b', ops) and not mn.startswith(('cmp', 'tst', 'str', 'cb', 'msr')):
                 return None
         return None
+
+    def msr_tested(self, f, k, reg):
+        """Whether the register that msr at f.insns[k] writes is compared or tested between the instruction that sets it and the
+        msr: then the msr can write a value that the test made known, as the vPortExitCritical of upstream FreeRTOS writes the
+        nesting count after it found it to be 0 (cbnz)."""
+        for q in range(k - 1, -1, -1):
+            _, mn, ops = f.insns[q]
+            if re.match(r'^' + reg + r'\b', ops):
+                if mn.startswith(('cmp', 'cmn', 'tst', 'teq', 'cb')):
+                    return True
+                if not mn.startswith(('str', 'msr')):
+                    return False
+        return False
 
     def analyse(self, f, summaries):
         """Data flow over one function. The state is (suspended, critical, basepri, primask), each a nesting depth relative to the
@@ -607,11 +630,18 @@ def clears(f, slot):
     return any(what == 'flag' and detail == (slot, 'clear') for what, _, detail in f.ops)
 
 
+def exit_restores(f):
+    """Whether f writes the masks only with values that it read with mrs or loaded from memory and did not test before, and
+    never clears one: the vPortExitCritical of a port that restores the mask that its critical section found."""
+    return (bool(f.mask_writes) and all(v == 'saved' and not tested for v, tested in f.mask_writes) and not clears(f, 2)
+            and not clears(f, 3))
+
+
 def unmask_roots(prog, summaries):
     """The functions that lift a mask, for each mask slot: (direct, nesting, critical_slots). direct[slot] are the functions with
-    an instruction that clears the slot; nesting is EXIT_CRITICAL, which lifts the mask of a critical section only at nesting 0;
-    critical_slots are the slots that a critical section masks, from what vPortEnterCritical leaves raised (BASEPRI on the
-    Cortex-M4F and M7, PRIMASK on the Cortex-M0+)."""
+    an instruction that clears the slot; nesting is EXIT_CRITICAL, which lifts the mask of a critical section only at nesting 0,
+    unless it restores the mask instead (exit_restores); critical_slots are the slots that a critical section masks, from what
+    vPortEnterCritical leaves raised (BASEPRI on the Cortex-M4F and M7, PRIMASK on the Cortex-M0+)."""
     critical_slots = {2}
     enter = prog.by_name.get('vPortEnterCritical')
     if enter is not None:
@@ -619,7 +649,8 @@ def unmask_roots(prog, summaries):
         raised = {slot for st in exits for slot in (2, 3) if st[slot] > 0}
         critical_slots = raised or critical_slots
     direct = {slot: {f.name for f in prog.funcs if clears(f, slot) and f.name != EXIT_CRITICAL} for slot in (2, 3)}
-    nesting = {EXIT_CRITICAL} & set(prog.by_name)
+    exit_critical = prog.by_name.get(EXIT_CRITICAL)
+    nesting = {EXIT_CRITICAL} if exit_critical is not None and not exit_restores(exit_critical) else set()
     return direct, nesting, critical_slots
 
 
@@ -627,11 +658,12 @@ def unmask_findings(prog, kernel, summaries, to_indirect):
     """(opener, kind, target) -> [(address, opener, chain)] for each place inside a region that masks interrupts where the mask
     can be lifted before the region ends: a call that reaches an instruction that clears the mask (cpsie i, or msr with the
     constant 0), a critical section that is not nested in one of the function's own and so ends with the mask lifted, a nested
-    clear in the function itself (chain None), or a call through a register. kind is basepri or primask, or critical for a
-    region that only a critical section of the function masks."""
+    clear in the function itself (chain None), or a call through a register; and each call that reaches BLOCK (target BLOCK).
+    kind is basepri or primask, or critical for a region that only a critical section of the function masks."""
     direct, nesting, critical_slots = unmask_roots(prog, summaries)
     to_direct = {slot: prog.reach(direct[slot], prog.noreturn, primitives=True) for slot in (2, 3)}
     to_exit = prog.reach(nesting, prog.noreturn, primitives=True)
+    to_block = prog.reach({BLOCK} & set(prog.by_name), prog.noreturn, primitives=True)
     found = collections.defaultdict(list)
     for f in prog.funcs:
         if f.name in PRIMITIVES or f.name in kernel or not (prog.changes_state(f) or any(c in summaries for _, c, _ in f.calls)):
@@ -648,6 +680,8 @@ def unmask_findings(prog, kernel, summaries, to_indirect):
                         continue
                     kind = KINDS[slot] if own else 'critical'
                     chain = None
+                    if what in ('call', 'tail') and detail and detail not in summaries and detail in to_block:
+                        found[(f.name, kind, BLOCK)].append((addr, f.name, to_block[detail]))
                     if what in ('call', 'tail') and detail and detail not in summaries:
                         if detail in to_direct[slot]:
                             chain = to_direct[slot][detail]
@@ -814,7 +848,7 @@ def main():
             prog = Program(elf, args.objdump, args.nm)
             if args.unmask:
                 direct, nesting, _ = unmask_roots(prog, {})
-                lifts = direct[2] | direct[3] | nesting
+                lifts = direct[2] | direct[3] | nesting | ({BLOCK} & set(prog.by_name))
                 print('\n'.join(query(prog, args.query, lambda n: n in lifts, primitives=True)))
             else:
                 print('\n'.join(query(prog, args.query)))
@@ -847,7 +881,12 @@ def main():
     new = sorted(set(found) - set(allowed))
     for key in new:
         first, text = describe(found[key])
-        if args.unmask and key.endswith('-> indirect call'):
+        if args.unmask and key.endswith('-> ' + BLOCK):
+            print(f'{first}: error: a call that can block inside a region that masks interrupts: {key}: {text}. The task cannot '
+                  f'switch away there, and FreeRTOS stops it in vAssertCalled (FreeRTOSConfig.h, xPortTaskCanBlock). Make the '
+                  f'call after the region or make sure that it cannot block there, and add the key to '
+                  f'{args.allowlist or "the allowlist"} with the reason')
+        elif args.unmask and key.endswith('-> indirect call'):
             print(f'{first}: error: call through a register inside a region that masks interrupts: {key}: {text}. Make sure '
                   f'that its targets do not lift the mask (no FreeRTOS call, no cpsie i, no BASEPRI 0) and add the key to '
                   f'{args.allowlist or "the allowlist"} with the reason')

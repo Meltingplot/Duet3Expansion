@@ -1,0 +1,6 @@
+MaskedCallback [primask] -> indirect call
+MaskedPoll [primask] -> xPortTaskCanBlock
+MaskedTake [primask] -> xPortTaskCanBlock
+MaskedVeneer [primask] -> FarEnable
+NestedEnable [primask] -> NestedEnable
+TakeInCritical [critical] -> xPortTaskCanBlock
