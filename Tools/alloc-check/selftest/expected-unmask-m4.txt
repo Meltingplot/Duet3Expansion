@@ -2,6 +2,7 @@ BoostedCallback [basepri] -> indirect call
 BoostedCritical [basepri] -> vPortExitCritical
 BoostedLocker [basepri] -> vPortExitCritical
 BoostedNotify [basepri] -> vPortExitCritical
+BoostedTake [basepri] -> vPortExitCritical
 MaskedCallback [primask] -> indirect call
 MaskedVeneer [primask] -> FarEnable
 NestedEnable [primask] -> NestedEnable

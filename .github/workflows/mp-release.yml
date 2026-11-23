@@ -174,8 +174,9 @@ jobs:
 
       - name: "Check for interrupts unmasked inside protected regions"
         # Fails for every place where code that runs with BASEPRI raised, with interrupts disabled or in a critical section
-        # lifts that mask before the region ends (a FreeRTOS call, cpsie i, BASEPRI 0, or a call through a register) and that
-        # unmask-allowlist.txt does not name. It reads the same ELF files; the step before has run the selftest for both checks
+        # lifts that mask before the region ends (a FreeRTOS call, cpsie i, BASEPRI 0, or a call through a register) or can
+        # block (xPortTaskCanBlock), and that unmask-allowlist.txt does not name. It reads the same ELF files; the step before
+        # has run the selftest for both checks
         working-directory: ./Duet3Expansion/Tools/alloc-check
         env:
           CROSS_COMPILE: ${{ github.workspace }}/${{ env.ARM_TOOLCHAIN }}/bin/arm-none-eabi-

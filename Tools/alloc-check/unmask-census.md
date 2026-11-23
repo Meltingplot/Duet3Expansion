@@ -74,3 +74,22 @@ The verdict per entry is its comment in `unmask-allowlist.txt`; this file has th
 | `Move::PhaseStepControlLoop [primask] -> indirect call` | EXP1HCL | SAFE-NO-UNMASK | As above, through `GetCurrentMotion` (`Move.cpp:2606`); TMC task |
 | `Move::ProcessM970 [primask] -> indirect call` | EXP1HCL | SAFE-NO-UNMASK | As above, through `GetCurrentMotion` (`Move.cpp:2500`); main task |
 | `CanDevice::Interrupt [primask] -> indirect call` | all | SAFE-NO-UNMASK | `rxCallback` inside the locker (CoreN2G `CanDevice.cpp:1289-1290`) is `StepTimer::CanTimingMessageReceived` (`CAN/CanInterface.cpp:268`). It stores three values and reads the timer (`Movement/StepTimer.cpp:195-200`), and `--unmask --query` shows that it reaches nothing that lifts a mask |
+
+## With the restoring ports (Meltingplot/FreeRTOS PR #1)
+
+From Meltingplot/FreeRTOS PR #1 on, the critical sections restore the mask that they found, and the trace hooks where a task
+blocks assert `xPortTaskCanBlock()` (see README.md). The check then finds no lift in a critical section any more, and reports the
+calls that can block inside a region instead (target `xPortTaskCanBlock`).
+
+- **Basis:** 3.7-dev at 7aa73f31 (2026-11-23) with RRFLibraries 3.7-dev 888b479 and CoreN2G 3.7-dev 7d41892, built once against
+  FreeRTOS 3.7-dev 980af10 and once with PR #1 (783d4c5), boards TOOL1LC, EXP1HCL and SZP. Line numbers refer to 7aa73f31.
+- **Gone with PR #1:** `Move::AddLinearSegments [basepri] -> vPortExitCritical` and `[primask] -> vPortExitCritical`.
+- **New with PR #1:** the two keys below. The other 6 keys stay as they are.
+- **How:** for each site, a script took the chains of `alloc-check.py`'s model again, but did not let them pass through
+  `Tasks::AllocPermanent`. No site reached `xPortTaskCanBlock` then. The shortest chain ends in the give of the malloc mutex,
+  which does not block (`queueMUTEX_GIVE_BLOCK_TIME` is 0, FreeRTOS `src/queue.c:83`, `:790`); the take is on the same path.
+
+| Entry | Boards | Verdict | Reason |
+|---|---|---|---|
+| `Move::AddLinearSegments [basepri] -> xPortTaskCanBlock` | EXP1HCL | SAFE-GUARDED | The same path as `Move::AddLinearSegments [basepri] -> vPortExitCritical` above: `Split` (`Move.cpp:1176`) calls `MoveSegment::Allocate`, which reaches `Tasks::AllocPermanent` only with an empty free list (`MoveSegment.cpp:16-30`), and `PrimeFreeList` (`Move.cpp:1119`) fills it right before the region. `GetMallocMutex` asserts BASEPRI and PRIMASK 0 on that path in any case (`Tasks.cpp:150`) |
+| `Move::AddLinearSegments [primask] -> xPortTaskCanBlock` | TOOL1LC | SAFE-GUARDED | As above; on the SAMC21 `GetMallocMutex` asserts PRIMASK 0 (`Tasks.cpp:148`) |

@@ -8,7 +8,8 @@
 #   make scan-unmask  the unmask check on the same ELF files: fail for each finding that unmask-allowlist.txt does not name
 #   make update       rewrite both allowlists with the findings of the ELF files that are there (keeps the comments of
 #                     existing entries)
-#   make selftest     check alloc-check.py against selftest/src/sample.cpp and selftest/src/no-alloc.cpp
+#   make selftest     check alloc-check.py against selftest/src/sample.cpp and selftest/src/no-alloc.cpp, also built for
+#                     FreeRTOS ports whose critical sections restore the mask (RESTORING_PORT)
 #
 # CONFIGS selects the boards, default those that the release workflow builds (BOARDS in .github/workflows/mp-release.yml).
 
@@ -25,12 +26,23 @@ ELFS = $(foreach c,$(CONFIGS),$(D3E)/$(c)/Duet3Firmware_$(c).elf)
 
 # The cores of the boards that the release builds, with the -mcpu and FPU flags of their makefiles: SAMC21 (TOOL1LC, SZP) and
 # SAME51 (EXP1HCL). The Cortex-M0+ has no BASEPRI, so its selftest expects no [basepri] finding of the heap check. The unmask
-# check has a list per core, because the critical sections of the two ports mask differently (see selftest/src/runtime.cpp)
-SELFTEST_CORES := m0plus m4
+# check has a list per core, because the critical sections of the two ports mask differently (see selftest/src/runtime.cpp).
+# The -restoring builds use the stand-ins of the ports of Meltingplot/FreeRTOS from PR #1 on, whose critical sections restore
+# the mask; their heap findings are those of the core
+SELFTEST_CORES := m0plus m4 m0plus-restoring m4-restoring
 CORE_FLAGS_m0plus := -mcpu=cortex-m0plus
 CORE_FLAGS_m4 := -mcpu=cortex-m4 -mfpu=fpv4-sp-d16 -mfloat-abi=hard
+CORE_FLAGS_m0plus-restoring := $(CORE_FLAGS_m0plus) -DRESTORING_PORT
+CORE_FLAGS_m4-restoring := $(CORE_FLAGS_m4) -DRESTORING_PORT
 EXPECTED_m0plus := grep -v '\[basepri\]' selftest/expected.txt
 EXPECTED_m4 := cat selftest/expected.txt
+EXPECTED_m0plus-restoring := $(EXPECTED_m0plus)
+EXPECTED_m4-restoring := $(EXPECTED_m4)
+# The error that the unmask check must print without allowlist
+UNMASK_ERROR_m0plus := interrupts unmasked inside a protected region: NestedEnable \[primask\] -> NestedEnable
+UNMASK_ERROR_m4 := $(UNMASK_ERROR_m0plus)
+UNMASK_ERROR_m0plus-restoring := a call that can block inside a region that masks interrupts: MaskedTake \[primask\] -> xPortTaskCanBlock
+UNMASK_ERROR_m4-restoring := $(UNMASK_ERROR_m0plus-restoring)
 # -O3 as in the board makefiles. .far at 0x20000000 is out of the range of bl, so that the linker calls the functions there
 # through veneers
 SELFTEST_FLAGS := -std=gnu++20 -mthumb -O3 -g -fno-exceptions -fno-rtti -nostdlib -nostartfiles -Wl,-e,Reset_Handler \
@@ -66,13 +78,13 @@ $(SELFTEST_CORES:%=selftest-%): selftest-%: build/selftest/%/sample.elf build/se
 	$(EXPECTED_$*) | diff -u - build/selftest/$*/keys.txt
 	$(CHECK) --root selftest --allowlist selftest/expected.txt $<
 	! $(CHECK) --root selftest $< > build/selftest/$*/without-allowlist.txt
-	grep -q 'src/sample.cpp:35: error: heap reached inside a protected region: SuspendedNew \[suspended\] -> operator new' build/selftest/$*/without-allowlist.txt
-	grep -q 'src/sample.cpp:86: error: call through a register inside a protected region: SuspendedCallback' build/selftest/$*/without-allowlist.txt
+	grep -q 'src/sample.cpp:37: error: heap reached inside a protected region: SuspendedNew \[suspended\] -> operator new' build/selftest/$*/without-allowlist.txt
+	grep -q 'src/sample.cpp:88: error: call through a register inside a protected region: SuspendedCallback' build/selftest/$*/without-allowlist.txt
 	$(CHECK) --root selftest --unmask --keys $< > build/selftest/$*/unmask-keys.txt
 	diff -u selftest/expected-unmask-$*.txt build/selftest/$*/unmask-keys.txt
 	$(CHECK) --root selftest --unmask --allowlist selftest/expected-unmask-$*.txt $<
 	! $(CHECK) --root selftest --unmask $< > build/selftest/$*/unmask-without-allowlist.txt
-	grep -q 'src/sample.cpp:[0-9]*: error: interrupts unmasked inside a protected region: NestedEnable \[primask\] -> NestedEnable' build/selftest/$*/unmask-without-allowlist.txt
+	grep -q 'src/sample.cpp:[0-9]*: error: $(UNMASK_ERROR_$*)' build/selftest/$*/unmask-without-allowlist.txt
 	printf '# header\nGone [suspended] -> malloc  # an entry of a finding that no longer exists\n' > build/selftest/$*/update.txt
 	$(CHECK) --root selftest --allowlist build/selftest/$*/update.txt --update build/selftest/$*/no-alloc.elf
 	printf '# header\n' | diff -u - build/selftest/$*/update.txt
