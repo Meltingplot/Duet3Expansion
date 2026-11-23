@@ -113,9 +113,12 @@ Each group shares one reason in `allowlist.txt`. CoreN2G is abbreviated CN, `CN/
   `AveragingFilter::CallbackFeedIntoFilter` (`AveragingFilter.h:84-91`) or `InputMonitor::CommonAnalogPortInterrupt`
   (`InputMonitor.cpp:112`, a task notification).
 - **Step functions** (`Move::AddLinearSegments` in the Move task, 3; `Move::PhaseStepControlLoop` and
-  `ClosedLoop::InstanceControlLoop` in the TMC task; `Move::ProcessM970` in main): `debugPrintf` (`RepRapFirmware.cpp:30-39`),
-  whose putc `CanInterface::DebugPutc` (`CanInterface.cpp:962-974`) writes a ring buffer and wakes the CAN sender, and on TOOL1LC
-  the `mov pc` switch and the Qfplib wrappers behind the veneers (see Veneers above). See B1 and B2.
+  `ClosedLoop::InstanceControlLoop` in the TMC task; `Move::ProcessM970` in main): the text of a step error. At the basis it
+  went to `debugPrintf` (`RepRapFirmware.cpp:30-39`), whose putc `CanInterface::DebugPutc` (`CanInterface.cpp:962-974`) writes
+  a ring buffer and wakes the CAN sender (B1 and B2). Since fix/step-error-print-in-region the putc is that of `SafeVsnprintf`
+  (RRFLibraries `SafeVsnprintf.cpp:809-822`), which stores into `Platform::genericDebugBuffer`. On TOOL1LC also the `mov pc`
+  switch and the Qfplib wrappers behind the veneers (see Veneers above), and with the fix the returns of `StringRef::printf`
+  and `catf`.
 - **`Platform::DoDiagnosticTest`** (main): the veneer to `fastSqrtf` in the timing test (`Platform.cpp:1594-1602`). No longer a
   finding since the check follows veneers.
 - **Closed loop** (`ClosedLoop::InstanceDiagnostics`, `ProcessM569Point4`, `ResetError`, `SetClosedLoopEnabled`; EXP1HCL, main
@@ -124,7 +127,8 @@ Each group shares one reason in `allowlist.txt`. CoreN2G is abbreviated CN, `CN/
 
 ## Findings outside this class
 
-None of these allocates, so the check does not report them, and none is fixed here.
+None of these allocates, so the check does not report them. B1 and B2 are fixed in fix/step-error-print-in-region, the others are
+not fixed.
 - **B1, EXP1HCL: a step error inside `Move::AddLinearSegments` lifts the step interrupt guard.** On the path
   `ScheduleFirstSegment` or `Move::Interrupt` to `CalcNextStepTimeFull` to `LogStepError` (`DriveMovement.cpp:620-631`) to
   `debugPrintf`, `CanInterface::DebugPutc` calls `WakeAsyncSender` (`CanInterface.cpp:795-806`). In a task this is
@@ -135,17 +139,23 @@ None of these allocates, so the check does not report them, and none is fixed he
   (`ARM_CM0/port.c:803-812`), so interrupts are enabled again inside the region.
 
   `make scan-unmask` finds B1 and B2 as calls through a register (`unmask-census.md`), because the putc of `debugPrintf` is one.
+
+  Fix for both in fix/step-error-print-in-region, as in RepRapFirmware (`DriveMovement::LogStepError` there): `LogStepError`
+  writes its text into `Platform::genericDebugBuffer` and sets `hasGenericDebug` (`DriveMovement.cpp:623-637` there), and
+  `Platform::Spin` prints it in the main task (`Platform.cpp:990-995` there). The keys stay; behind them is now the putc of
+  `SafeVsnprintf`.
 - **B3, EXP1HCL: an SPI mutex inside a suspended region.** The AS5047D and MT6835 readings select the shared SPI device
   (`CN/SPI/SharedSpiDevice.h:20`, `Mutex::Take` with 0 ticks) inside the closed loop regions. There is no wait, FreeRTOS asserts only
   for a timeout other than 0 with the scheduler suspended (`queue.c:1682`), but the reading fails when another task holds the
   SPI bus, and `ClosedLoop::ResetError` ignores that (`ClosedLoop.cpp:1202`).
-- **Debug buffer.** `debugBuffer` has two writers, the step ISR and the tasks, and `RingBuffer` assumes one
-  (RRFLibraries `RingBuffer.h:59`, `:84-94`).
+- **Debug buffer.** `debugBuffer` has two writers, the step ISR and the tasks, and `RingBuffer` assumes one (RRFLibraries
+  `RingBuffer.h:59`, `:84-94`). Since fix/step-error-print-in-region the step ISR no longer writes it: its only path to
+  `debugPrintf` was `LogStepError`. Whether the tasks are one writer was not traced.
 
 ## UNCLEAR
 
 - U1. Whether B1 and B2 can occur: `LogStepError` runs only on step errors (`DriveMovement.cpp:585-892`); the census did not settle
-  whether one can occur inside `AddLinearSegments`.
+  whether one can occur inside `AddLinearSegments`. The fix does not depend on it.
 - U2. Whether a caller of the EXP1HCL `[primask]` regions holds an outer `ChangeBasePriority`, which B1's `vPortExitCritical` would
   clear too.
 - U3. On the SAMC21 some AnalogIn callbacks are passed in registers, not as literals; the targets rest on the source

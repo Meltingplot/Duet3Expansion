@@ -617,16 +617,21 @@ static inline motioncalc_t fastLimSqrtm(motioncalc_t f) noexcept
 }
 
 // Tell the Move class that we had a step error. This always returns false so that CalcNextStepTimeFull can tail-chain to it.
+// The message goes to Platform::genericDebugBuffer, as in RepRapFirmware. Printing here would wake the CAN sender with a
+// task notification when the Move task calls this inside Move::AddLinearSegments, and its critical section would let the
+// step interrupt in before the region ends.
 bool DriveMovement::LogStepError(uint8_t type, float info, const MoveSegment *seg) noexcept
 {
 	state = DMState::stepError;
 	stepErrorType = type;
-	debugPrintf("Code %u move error: info=%.3g, seg: ", type, (double)info);
+	const StringRef& dbgRef = Platform::genericDebugBuffer.GetRef();
+	dbgRef.printf("Code %u move error: info=%.3g, seg: ", type, (double)info);
 	if (seg != nullptr)
 	{
-		seg->DebugPrint();
+		seg->AppendDetails(dbgRef);
 	}
-	debugPrintf("\n");
+	dbgRef.cat('\n');
+	Platform::hasGenericDebug = true;
 	moveInstance->LogStepError(type);
 	return false;
 }
