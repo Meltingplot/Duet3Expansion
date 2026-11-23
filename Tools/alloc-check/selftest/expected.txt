@@ -8,6 +8,7 @@ MaskedNew [primask] -> operator new
 OutOfLineFree [suspended] -> free
 SuspendedCallback [suspended] -> indirect call
 SuspendedNew [suspended] -> operator new
+SuspendedVeneer [suspended] -> malloc
 SwitchInRegion [suspended] -> malloc
 TestIrq_Handler [isr] -> malloc
 src/sample.cpp: StaticSuspended [suspended] -> malloc

@@ -254,8 +254,16 @@ class Program:
             self.noreturn |= more
 
     def resolve(self, name):
-        m = VENEER_RE.match(name)
-        return m.group(1) if m and m.group(1) in self.by_name else name
+        """The function that a call to name runs. A veneer of the linker (__name_veneer) jumps to the address in its literal
+        (ldr.w pc, [pc] on the Cortex-M4 and M7; ldr r0, mov ip, r0, bx ip on the Cortex-M0+). Its name is not enough: for a
+        C++ function it holds the mangled name (___ZN13DriveMovement10NewSegmentEm_veneer), which the demangled names do not
+        contain."""
+        veneer = self.by_name.get(name) if VENEER_RE.match(name) else None
+        for _, mn, ops in (veneer.insns if veneer else ()):
+            if mn == '.word':
+                target = self.by_start.get(int(ops, 16) & ~1)
+                return target.name if target else name
+        return name
 
     def literal_target(self, f, k, reg):
         """The function whose address the register holds at a call through it, if it was loaded from a literal a few

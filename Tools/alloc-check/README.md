@@ -66,7 +66,9 @@ no long branch). The number of table entries comes from the bounds check before 
 `MessageBufferAlloc` (through which CANlib's `CanMessageBuffer` allocates; in EXP1HCL with the fix the compiler inlines all of
 `Tasks::AllocPermanent` into it).
 
-**Calls through a register** are findings of their own (target `indirect call`); `census.md` names their targets.
+**Calls through a register** are findings of their own (target `indirect call`); `census.md` names their targets. The veneers
+of the linker (`__*_veneer`), through which the SAMC21 boards call their step functions in RAM, are followed to the function at
+the address in their literal, also for a C++ function, whose veneer has the mangled name.
 
 **Key format:** `Opener [kind] -> target`, with the file for a static function. Each new finding gives one line in the format of
 compiler errors.
@@ -121,12 +123,9 @@ call that reaches both gives only the key of the function. The message is `inter
 `call through a register inside a region that masks interrupts`.
 
 **What it does not see**, in addition to the list above:
-- **Veneers.** The SAMC21 boards call the step functions in RAM through veneers, whose names the check does not resolve. It
-  reports each such call as a call through a register, and `unmask-census.md` reads its target. B2 of `census.md` is found
-  this way.
 - **The putc of `debugPrintf`.** `CanInterface::DebugPutc` wakes the CAN sender for the end of each message
-  (`CAN/CanInterface.cpp:962-974`). It is reached through a register, so a print inside a region is a call through a register
-  and not a FreeRTOS call.
+  (`CAN/CanInterface.cpp:962-974`). It is reached through a register (a `function_ref`), so a print inside a region is a call
+  through a register and not a FreeRTOS call. B1 and B2 of `census.md` are found this way.
 - **A critical section that a caller holds.** A FreeRTOS call then leaves the mask in place, but the check reports it.
 - **When the mask is lifted.** A call that lifts it as the last thing in the region is found like one at its start.
 

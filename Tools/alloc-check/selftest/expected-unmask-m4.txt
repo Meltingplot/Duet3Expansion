@@ -3,4 +3,5 @@ BoostedCritical [basepri] -> vPortExitCritical
 BoostedLocker [basepri] -> vPortExitCritical
 BoostedNotify [basepri] -> vPortExitCritical
 MaskedCallback [primask] -> indirect call
+MaskedVeneer [primask] -> FarEnable
 NestedEnable [primask] -> NestedEnable
