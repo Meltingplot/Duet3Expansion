@@ -1,0 +1,4 @@
+MaskedCallback [primask] -> indirect call
+MaskedCritical [primask] -> vPortExitCritical
+MaskedNotify [primask] -> vPortExitCritical
+NestedEnable [primask] -> NestedEnable

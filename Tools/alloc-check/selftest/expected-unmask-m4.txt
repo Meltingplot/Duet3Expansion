@@ -1,0 +1,6 @@
+BoostedCallback [basepri] -> indirect call
+BoostedCritical [basepri] -> vPortExitCritical
+BoostedLocker [basepri] -> vPortExitCritical
+BoostedNotify [basepri] -> vPortExitCritical
+MaskedCallback [primask] -> indirect call
+NestedEnable [primask] -> NestedEnable
