@@ -93,6 +93,9 @@ void NonVolatileMemory::EnsureWritten() noexcept
 	{
 		Flash::RwwWrite(RWW_ADDR + (512 * (unsigned int)page), 512, (uint8_t*)&buffer);
 		state = NvmState::clean;
+		// Flash::RwwWrite returns once it has started the write of the last page. Wait for it to finish, as the SAME5x code above waits for
+		// the SmartEEPROM, so that a reset that follows (the exception handlers) does not cut it short
+		while ((NVMCTRL->INTFLAG.reg & NVMCTRL_INTFLAG_READY) == 0) { }
 	}
 #elif SAM4E || SAME70
 	if (state == NvmState::eraseAndWriteNeeded)
