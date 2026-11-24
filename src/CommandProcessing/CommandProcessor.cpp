@@ -400,6 +400,22 @@ static GCodeResult ProcessM915(const CanMessageGeneric& msg, const StringRef& re
 
 	const auto drivers = LocalDriversBitmap::MakeFromRaw(driverBits);
 
+	// Refuse the request if it names a driver that this board doesn't have, as the main board does for its own drivers
+	GCodeResult rslt = GCodeResult::ok;
+	drivers.Iterate([&reply, &rslt](unsigned int drive, unsigned int) noexcept
+						{
+							if (drive >= NumDrivers)
+							{
+								reply.lcatf("No such driver %u.%u", CanInterface::GetCanAddress(), drive);
+								rslt = GCodeResult::error;
+							}
+						}
+				   );
+	if (rslt != GCodeResult::ok)
+	{
+		return rslt;
+	}
+
 	bool seen = false;
 	{
 		int8_t sgThreshold;
