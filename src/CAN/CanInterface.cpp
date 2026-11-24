@@ -768,7 +768,8 @@ void CanInterface::UpdateSyncLockState(bool synced) noexcept
 			syncLockLost = true;
 			syncLossCount++;
 		}
-		if (!timeoutActioned && millis() - StepTimer::GetWhenLastSynced() > connectionTimeoutMillis)
+		const uint32_t wls = StepTimer::GetWhenLastSynced();			// capture whenLastSynced before we call millis in case we get interrupted
+		if (!timeoutActioned && millis() - wls > connectionTimeoutMillis)
 		{
 			Heat::SwitchOffAll();
 			timeoutActioned = true;
