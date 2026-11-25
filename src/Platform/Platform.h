@@ -215,6 +215,8 @@ namespace Platform
 		for (;;) { }
 	}
 
+	const char *_ecv_array _ecv_null GetBootloaderVersionText() noexcept;
+
 #if HAS_VOLTAGE_MONITOR
 	MinCurMax GetPowerVoltages(bool resetMinMax) noexcept;
 	float GetCurrentVinVoltage() noexcept;
