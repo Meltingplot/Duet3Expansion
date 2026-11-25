@@ -155,6 +155,7 @@ static Task<CanAsyncSenderTaskStackWords> *canAsyncSenderTask = nullptr;	// allo
 
 static bool mainBoardAcknowledgedAnnounce = false;	// true after the main board has acknowledged our announcement
 static bool isProgrammed = false;					// true after the main board has sent us any configuration commands
+static bool timeSyncOrStartupMessageReceived = false;	// true after a time sync message or a startup message has been received
 
 // Connection timeout handling after loss of time sync
 constexpr uint32_t DefaultConnectionTimeoutMillis = 10000;
@@ -407,7 +408,11 @@ bool CanInterface::Send(CanMessageBuffer *buf) noexcept
 {
 	//TODO option to not force sending, and return true only if successful?
 	MutexLocker lock(txFifoMutex);								// this is called from multiple tasks so we need to lock the mutex
-	const uint32_t cancelledId = can0dev->SendMessage(CanDevice::TxBufferNumber::fifo, 1000, buf);
+
+	// If we are not receiving time sync messages then nothing may be acknowledging our messages. Don't wait for space in the fifo in that case,
+	// otherwise the heat task takes a second per status message and gets reset by its watchdog
+	const uint32_t wls = StepTimer::GetWhenLastSynced();		// read this before calling millis() in case it is updated
+	const uint32_t cancelledId = can0dev->SendMessage(CanDevice::TxBufferNumber::fifo, (millis() - wls <= StepTimer::MinSyncInterval) ? 1000 : 0, buf);
 	if (cancelledId != 0)
 	{
 		lastCancelledId = cancelledId;
@@ -471,6 +476,11 @@ CanMessageBuffer *CanInterface::ProcessReceivedMessage(CanMessageBuffer *buf) no
 		{
 #if SUPPORT_DRIVERS
 		case CanMessageType::movementLinearShaped:
+			if (!buf->msg.moveLinearShaped.ValidMessageLength(buf->dataLength))
+			{
+				break;
+			}
+
 			// Check for duplicate and out-of-sequence message
 			// We can get out-of-sequence messages because of a bug in the CAN hardware; so use only the sequence number to detect duplicates
 			{
@@ -555,6 +565,10 @@ CanMessageBuffer *CanInterface::ProcessReceivedMessage(CanMessageBuffer *buf) no
 			return nullptr;
 
 		case CanMessageType::stopMovement:
+			if (!buf->msg.stopMovement.ValidMessageLength(buf->dataLength))
+			{
+				break;
+			}
 			moveInstance->StopDrivers(buf->msg.stopMovement.whichDrives);
 # if 0
 			//DEBUG
@@ -564,6 +578,11 @@ CanMessageBuffer *CanInterface::ProcessReceivedMessage(CanMessageBuffer *buf) no
 			break;
 
 		case CanMessageType::revertPosition:
+			if (!buf->msg.revertPosition.ValidMessageLength(buf->dataLength))
+			{
+				break;
+			}
+
 			{
 				// Generate a regular movement message from this revert message. First, extract the data so that we can use the same buffer, in case we are short of buffers.
 				static_assert(NumDrivers < MaxLinearDriversPerCanSlave);			// the code assumes that we can build a movement message describing all our drivers
@@ -642,6 +661,7 @@ CanMessageBuffer *CanInterface::ProcessReceivedMessage(CanMessageBuffer *buf) no
 			else
 			{
 				mainBoardAcknowledgedAnnounce = false;	// we've recently started up, so no need to reset; but assume that we need to announce ourselves
+				timeSyncOrStartupMessageReceived = true;
 			}
 			Platform::OnProcessingCanMessage();
 			break;
@@ -719,14 +739,23 @@ void CanInterface::Diagnostics(const StringRef& reply) noexcept
 	reply.lcatf("Connection timeout %" PRIu32 "s, sync losses %u, timeout shutdowns %u", connectionTimeoutMillis / 1000, syncLossCount, timeoutShutdownCount);
 }
 
-// Send an announcement message if we need to, returning true if we sent one. On return the buffer is available to use again.
+// Send an announcement message if we have seen activity on the bus and we haven't sent one, or we have but it hasn't been acknowledged.
+// Return true if it's *not* OK to send regular status messages to the bus
+// Else return false, meaning that we have seen activity on the bus, sent an announce message, and it has been acknowledged.
+// On return the buffer is available to use again.
 bool CanInterface::SendAnnounce(CanMessageBuffer *buf) noexcept
 {
-	if (mainBoardAcknowledgedAnnounce)
+	if (!timeSyncOrStartupMessageReceived)
 	{
-		return false;
+		return true;							// bus is not active so don't queue up lots of announce messages
 	}
 
+	if (mainBoardAcknowledgedAnnounce)
+	{
+		return false;							// our announcement has been acknowledged, so it's OK to send status messages
+	}
+
+	// Else the bus is active but we haven't sent an announcement; or if we have, we haven't received an acknowledgement.
 	auto msg = buf->SetupRequestMessageNoRid<CanMessageAnnounceV1>(boardAddress, currentMasterAddress);
 	msg->timeSinceStarted = millis();
 	msg->numDrivers = NumDrivers;
@@ -833,7 +862,7 @@ void CanInterface::WakeAsyncSenderFromIsr() noexcept
 	canAsyncSenderTask->GiveFromISR(NotifyIndices::CanAsyncSender);
 }
 
-GCodeResult CanInterface::ChangeAddressAndDataRate(const CanMessageSetAddressAndNormalTiming &msg, const StringRef &reply) noexcept
+GCodeResult CanInterface::ChangeAddressAndDataRate(const CanMessageSetAddressAndNormalTiming &msg, size_t dataLength, const StringRef &reply) noexcept
 {
 	if (msg.oldAddress == boardAddress)
 	{
@@ -850,7 +879,12 @@ GCodeResult CanInterface::ChangeAddressAndDataRate(const CanMessageSetAddressAnd
 		if (msg.doSetTiming == CanMessageSetAddressAndNormalTiming::DoSetTimingYes)
 		{
 			seen = true;
-			canConfigData.SetTiming(msg.normalTiming);
+			CanTiming timing = msg.normalTiming;
+			if (dataLength < sizeof(msg))
+			{
+				timing.dataRateMultiplier = 0;				// main boards before 3.7 send no data phase timing
+			}
+			canConfigData.SetTiming(timing);
 		}
 
 		if (seen)
@@ -929,7 +963,7 @@ extern "C" [[noreturn]] void CanClockLoop(void *) noexcept
 								CanDevice::RxBufferNumber::buffer0,
 #endif
 									TaskBase::TimeoutUnlimited, &buf);
-		if (buf.id.MsgType() == CanMessageType::timeSync
+		if (buf.id.MsgType() == CanMessageType::timeSync && buf.msg.sync.ValidMessageLength(buf.dataLength)
 #if defined(ATEIO) || defined(ATECM)
 			&& (buf.id.Src() == CanId::ATEMasterAddress))			// ATE boards only respond to the ATE master, because a main board under test may also transmit when it starts up
 #else
@@ -939,6 +973,7 @@ extern "C" [[noreturn]] void CanClockLoop(void *) noexcept
 			currentMasterAddress = buf.id.Src();
 			StepTimer::ProcessTimeSyncMessage(buf.msg.sync, buf.dataLength, buf.timeStamp);
 			CanInterface::CheckBrs(buf.msg.sync);
+			timeSyncOrStartupMessageReceived = true;
 		}
 	}
 }
