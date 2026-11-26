@@ -16,6 +16,10 @@ The verdict per entry is its comment in `unmask-allowlist.txt`; this file has th
 - **Removed with Meltingplot/FreeRTOS#1 (d3ce7a3):** with d3ce7a3 pinned, `make update` removed the two
   `Move::AddLinearSegments -> vPortExitCritical` keys (2026-11-23, 3.7-dev 16c3abf3), see "With the restoring ports" below.
   `unmask-allowlist.txt` has 8 entries again: the 6 SAFE-NO-UNMASK entries and the two `-> xPortTaskCanBlock` keys of that section.
+- **Removed with the upstream sync of 2026-11-26:** upstream 0f63349f removed the malloc lock from `Tasks::AllocPermanent`, which
+  now only calls `CoreAllocPermanent` (an interrupt lock, CoreN2G c9b23d7). `make update` removed the two
+  `Move::AddLinearSegments -> xPortTaskCanBlock` keys: no path from the region reaches a call that can block any more.
+  `unmask-allowlist.txt` has the 6 SAFE-NO-UNMASK entries.
 - **How:**
   - `alloc-check.py --unmask` lists each site with the shortest chain.
   - The targets of the calls through a register are those that `census.md` names for the heap check (`census.md:80-126`).

@@ -1,6 +1,6 @@
-# Host test of the lock that Tasks::AllocPermanent takes: the real text of the malloc mutex functions and Tasks::AllocPermanent
+# Host test of the lock that keeps Tasks::AllocPermanent from racing malloc: the real text of the malloc mutex functions and Tasks::AllocPermanent
 # from src/Platform/Tasks.cpp and of _sbrk and CoreAllocPermanent from CoreN2G's src/syscalls.h, extracted at build time, with
-# the mutex, the scheduler state and the interrupt mask played in alloc_permanent_lock_test.cpp. Run with make in WSL (g++ 13).
+# the interrupt mask, the mutex and the scheduler state played in alloc_permanent_lock_test.cpp. Run with make in WSL (g++ 13).
 #
 #   make              build build/alloc-permanent-lock-test
 #   make asan         the same with AddressSanitizer and UBSan, build/asan-alloc-permanent-lock-test
