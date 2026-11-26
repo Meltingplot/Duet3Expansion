@@ -2,13 +2,17 @@
 // time. On the TOOL1LC the SDADC converts PA07/PA06 (Vref/Vssa, Duet3Expansion src/Platform/Platform.cpp SetupThermistorFilter(VrefPin,
 // SdAdcVrefFilterIndex, true)), which ADC0 converts as well; while both converted at once ADC0 read Vssa ~1087 counts instead of ~104 and
 // the PT1000 read 8.8 C instead of 24.5 C (lab printer 2026-11-26, forum thread 39227). The file under test is compiled unchanged against
-// the stand-ins in stubs/; the ADC, the SDADC and the DMAC are modelled here. See README.md.
+// the stand-ins in stubs/; the ADC, the SDADC and the DMAC are modelled here.
+// Since TL3 the test also models the TMC task of the TOOL1LC, which competes for the DMA transfer mutex (DmacManager::GetTransferMutex):
+// a TMC UART transfer must never run while an ADC DMA channel is enabled (SAM C20/C21 erratum 1.10.4, DS80000740), and the AIN task
+// starts at most one sweep per tick. See README.md.
 
 #include <AnalogIn.h>
 
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
+#include <algorithm>
 #include <string>
 #include <vector>
 #include <unistd.h>
@@ -54,7 +58,32 @@ static ModelDmaChannel dma[8];
 static uint64_t nowUs = 1000000;
 static bool notified = false;
 static int taskHandleDummy;
-static unsigned int loopIterations = 0, delays = 0, overlaps = 0, restartsWhileConverting = 0;
+static unsigned int loopIterations = 0, overlaps = 0, restartsWhileConverting = 0;
+static unsigned int startsInSameTick = 0, startsWithoutMutex = 0, callbacksWithMutex = 0;
+static uint32_t lastStartTick = 0;
+static bool anyStart = false;
+
+// The DMA transfer mutex and the TMC task of the TOOL1LC that competes for it, as Duet3Expansion src/Movement/StepperDrivers/TMC22xx.cpp
+// DoTransaction does it: take the mutex, run a UART transfer on two DMA channels, release the mutex, then delay(2) before the next one.
+// TmcTransferUs is about a register read at DriversBaudRate 200000 (src/Config/TOOL1LC.h): 4 bytes out, 8 bytes back, 10 bits each.
+// A TMC task that is waiting for the mutex gets it when the AIN task releases it; the AIN task blocks in delay(1) right after that.
+enum class Holder : uint8_t { none, ain, tmc };
+static Holder holder = Holder::none;
+
+struct TmcModel
+{
+	bool enabled;
+	bool waiting;								// wants the mutex
+	bool transferring;							// holds the mutex, its DMA channels are enabled
+	uint64_t eventUs;							// when it next wants the mutex, or when its transfer ends
+	uint64_t waitStartUs, maxWaitUs;
+	unsigned int transfers, overlaps;			// overlaps: transfers that started or ran while an ADC DMA channel was enabled
+};
+static TmcModel tmc = {};
+static uint64_t ainMaxMutexWaitUs = 0;
+constexpr uint64_t TmcTransferUs = 650;
+constexpr uint64_t TmcPauseUs = 2000;
+constexpr uint64_t NoEvent = UINT64_MAX;
 
 // A converter that has been triggered converts until it finishes or is reset. Starting one while the other converts is the fault.
 void ModelSoftwareTrigger(ModelConverter *conv) noexcept
@@ -71,6 +100,13 @@ void ModelSoftwareTrigger(ModelConverter *conv) noexcept
 			++overlaps;
 		}
 	}
+	const uint32_t tick = millis();
+	if (anyStart && tick == lastStartTick)
+	{
+		++startsInSameTick;
+	}
+	anyStart = true;
+	lastStartTick = tick;
 	conv->converting = true;
 	conv->endUs = nowUs + conv->durationUs;
 }
@@ -123,14 +159,119 @@ static ModelConverter *NextToFinish(uint64_t limit) noexcept
 	return next;
 }
 
+static bool AdcDmaEnabled() noexcept
+{
+	for (const ModelConverter *conv : converters)
+	{
+		if (conv->dmaChan < 8 && dma[conv->dmaChan].enabled)
+		{
+			return true;
+		}
+	}
+	return false;
+}
+
+static void TmcStartTransfer() noexcept
+{
+	holder = Holder::tmc;
+	tmc.waiting = false;
+	tmc.transferring = true;
+	++tmc.transfers;
+	if (nowUs - tmc.waitStartUs > tmc.maxWaitUs)
+	{
+		tmc.maxWaitUs = nowUs - tmc.waitStartUs;
+	}
+	if (AdcDmaEnabled())
+	{
+		++tmc.overlaps;
+	}
+	tmc.eventUs = nowUs + TmcTransferUs;
+}
+
+static void TmcEvent() noexcept
+{
+	nowUs = tmc.eventUs;
+	if (tmc.transferring)
+	{
+		// The transfer has finished: DoTransaction releases the mutex and calls delay(2)
+		tmc.transferring = false;
+		if (holder == Holder::tmc)
+		{
+			holder = Holder::none;
+		}
+		tmc.eventUs = nowUs + TmcPauseUs;
+	}
+	else
+	{
+		// DoTransaction wants the mutex. Without the fix nobody else takes it, so the transfer starts at once.
+		tmc.waitStartUs = nowUs;
+		if (holder == Holder::none)
+		{
+			TmcStartTransfer();
+		}
+		else
+		{
+			tmc.waiting = true;
+			tmc.eventUs = NoEvent;
+		}
+	}
+}
+
 static void AdvanceTo(uint64_t t) noexcept
 {
-	for (ModelConverter *conv; (conv = NextToFinish(t)) != nullptr; )
+	for (;;)
 	{
-		nowUs = conv->endUs;
-		Complete(conv);
+		ModelConverter * const conv = NextToFinish(t);
+		const uint64_t tmcEventUs = tmc.enabled ? tmc.eventUs : NoEvent;
+		if (conv != nullptr && conv->endUs <= tmcEventUs)
+		{
+			nowUs = conv->endUs;
+			Complete(conv);
+		}
+		else if (tmcEventUs <= t)
+		{
+			TmcEvent();
+		}
+		else
+		{
+			break;
+		}
 	}
 	nowUs = t;
+}
+
+static uint64_t NextTickUs(uint32_t ticks) noexcept
+{
+	return ((nowUs / 1000) + ticks) * 1000;					// FreeRTOS counts a delay or timeout from the current tick
+}
+
+// The AIN task's side of the mutex. A TMC transfer that holds it runs to its end first.
+Mutex transferMutex;
+Mutex& DmacManager::GetTransferMutex() noexcept { return transferMutex; }
+
+bool Mutex::Take(uint32_t) noexcept
+{
+	const uint64_t start = nowUs;
+	while (holder == Holder::tmc)
+	{
+		AdvanceTo(tmc.eventUs);
+	}
+	if (nowUs - start > ainMaxMutexWaitUs)
+	{
+		ainMaxMutexWaitUs = nowUs - start;
+	}
+	holder = Holder::ain;
+	return true;
+}
+
+bool Mutex::Release() noexcept
+{
+	holder = Holder::none;
+	if (tmc.enabled && tmc.waiting)
+	{
+		TmcStartTransfer();
+	}
+	return true;
 }
 
 uint32_t millis() noexcept { return (uint32_t)(nowUs / 1000); }
@@ -145,7 +286,18 @@ namespace DmacManager
 	{
 		((source == DmaTrigSource::sdadc_resrdy) ? sdadcConv : adc0Conv).dmaChan = channel;
 	}
-	void EnableChannel(DmaChannel channel, DmaPriority) noexcept { dma[channel].enabled = true; }
+	void EnableChannel(DmaChannel channel, DmaPriority) noexcept
+	{
+		dma[channel].enabled = true;
+		if (holder != Holder::ain)
+		{
+			++startsWithoutMutex;
+		}
+		if (tmc.transferring)
+		{
+			++tmc.overlaps;
+		}
+	}
 	bool DisableChannel(DmaChannel channel) noexcept			// on the SAMC21 this also disables the channel interrupts
 	{
 		dma[channel].enabled = false;
@@ -177,20 +329,21 @@ struct Scenario
 	bool adc0Hung, sdadcHung;
 	unsigned int enableSdadcAtIteration;		// 0 = enable the SDADC channels before the task starts
 	unsigned int iterations;
+	bool tmcTask;								// the TMC task of the TOOL1LC competes for the DMA transfer mutex
 };
 
 static const Scenario scenarios[] =
 {
-	{ "turns", "TOOL1LC channels: ADC0 temp0, board type, Vssa, Vref, Vin; SDADC Vref/Vssa",
-		{ 3, 5, 6, 7, 8 }, { 0 }, false, false, 0, 4000 },
-	{ "adc0-only", "no SDADC channel (SZP with temp0 on ADC0): ADC0 converts back to back",
-		{ 3, 7 }, { }, false, false, 0, 2000 },
-	{ "sdadc-enabled-later", "the SDADC channel is enabled while ADC0 is running",
-		{ 6, 7, 8 }, { 0 }, false, false, 100, 4000 },
-	{ "sdadc-hung", "the SDADC never finishes: ADC0 still gets its turns",
-		{ 6, 7, 8 }, { 0 }, false, true, 0, 2000 },
-	{ "adc0-hung", "ADC0 never finishes: the SDADC still gets its turns",
-		{ 6, 7, 8 }, { 0 }, true, false, 0, 2000 },
+	{ "turns", "TOOL1LC channels: ADC0 temp0, board type, Vssa, Vref, Vin; SDADC Vref/Vssa; TMC task",
+		{ 3, 5, 6, 7, 8 }, { 0 }, false, false, 0, 4000, true },
+	{ "adc0-only", "no SDADC channel and no TMC task (SZP with temp0 on ADC0): ADC0 converts once per tick",
+		{ 3, 7 }, { }, false, false, 0, 2000, false },
+	{ "sdadc-enabled-later", "the SDADC channel is enabled while ADC0 is running; TMC task",
+		{ 6, 7, 8 }, { 0 }, false, false, 100, 4000, true },
+	{ "sdadc-hung", "the SDADC never finishes: ADC0 and the TMC task still get their turns",
+		{ 6, 7, 8 }, { 0 }, false, true, 0, 2000, true },
+	{ "adc0-hung", "ADC0 never finishes: the SDADC and the TMC task still get their turns",
+		{ 6, 7, 8 }, { 0 }, true, false, 0, 2000, true },
 };
 
 static const Scenario *scenario = nullptr;
@@ -200,6 +353,10 @@ static void ChannelCallback(CallbackParameter p, int32_t reading) noexcept
 	const unsigned int conv = p.u32 >> 8, chan = p.u32 & 0xFF;
 	ChannelStats& s = stats[conv][chan];
 	++s.calls;
+	if (holder == Holder::ain)
+	{
+		++callbacksWithMutex;
+	}
 	const unsigned int id = ((uint32_t)reading >> 12) & 0x0F, position = ((uint32_t)reading >> 8) & 0x0F, sequence = (uint32_t)reading & 0xFF;
 	if (id != conv || position != s.expectedPosition)
 	{
@@ -248,15 +405,39 @@ static void EnableChannels(unsigned int conv, const std::vector<unsigned int>& c
 		if (!ok) { ++failures; }
 	};
 
-	std::printf("    %u loop iterations, %.1f ms simulated, ADC0 %u starts %u completions max gap %.2f ms, SDADC %u starts %u completions max gap %.2f ms\n"
+	const uint64_t simulatedMs = (nowUs - 1000000) / 1000;
+	std::printf("    %u loop iterations, %u ms simulated, ADC0 %u starts %u completions max gap %.2f ms, SDADC %u starts %u completions max gap %.2f ms\n"
 				"    AnalogIn: %u started, %u completed, %u timed out, %u errors\n",
-				loopIterations, (double)(nowUs - 1000000) / 1000.0,
+				loopIterations, (unsigned int)simulatedMs,
 				adc0Conv.starts, adc0Conv.completions, (double)adc0Conv.maxGapUs / 1000.0,
 				sdadcConv.starts, sdadcConv.completions, (double)sdadcConv.maxGapUs / 1000.0,
 				(unsigned int)started, (unsigned int)completed, (unsigned int)timeouts, (unsigned int)errors);
+	if (scenario->tmcTask)
+	{
+		std::printf("    TMC task: %u transfers, longest wait for the mutex %u us; AIN task: longest wait for the mutex %u us\n",
+					tmc.transfers, (unsigned int)tmc.maxWaitUs, (unsigned int)ainMaxMutexWaitUs);
+	}
 
 	check(overlaps == 0, "ADC0 and SDADC never convert at the same time (overlapping starts: " + std::to_string(overlaps) + ")");
 	check(restartsWhileConverting == 0, "no converter is started again while it is converting (" + std::to_string(restartsWhileConverting) + ")");
+	check(startsInSameTick == 0, "at most one conversion starts per tick (" + std::to_string(startsInSameTick) + " more)");
+	check(startsWithoutMutex == 0, "an ADC DMA channel is enabled only while the AIN task holds the DMA transfer mutex ("
+			+ std::to_string(startsWithoutMutex) + " without)");
+	check(callbacksWithMutex == 0, "the callbacks run after the AIN task has released the mutex (" + std::to_string(callbacksWithMutex) + " with)");
+	if (scenario->tmcTask)
+	{
+		const bool hangs = scenario->adc0Hung || scenario->sdadcHung;
+		check(tmc.overlaps == 0, "no TMC transfer runs while an ADC DMA channel is enabled (" + std::to_string(tmc.overlaps) + ")");
+		// The TMC task waits for one sweep at most, or for the conversion timeout (AdcConversionTimeout, 5 ticks) and one tick if a converter hangs
+		const uint64_t tmcWaitLimitUs = hangs ? 6000 : std::max(adc0Conv.durationUs, sdadcConv.durationUs);
+		check(tmc.maxWaitUs <= tmcWaitLimitUs, "the TMC task waits at most " + std::to_string(tmcWaitLimitUs) + " us for the mutex ("
+				+ std::to_string(tmc.maxWaitUs) + " us)");
+		check(ainMaxMutexWaitUs <= TmcTransferUs, "the AIN task waits at most one TMC transfer for the mutex (" + std::to_string(ainMaxMutexWaitUs) + " us)");
+		// One transfer and delay(2) take about 2.65 ms, a sweep may come in between. A hung converter holds the mutex for its timeout each turn.
+		const uint64_t minTransfers = simulatedMs / (hangs ? 8 : 4);
+		check(tmc.transfers >= minTransfers, "the TMC task transfers regularly (" + std::to_string(tmc.transfers) + " transfers, at least "
+				+ std::to_string(minTransfers) + ")");
+	}
 
 	const bool adc0Used = !scenario->adc0Channels.empty(), sdadcUsed = !scenario->sdadcChannels.empty();
 	for (unsigned int conv = 0; conv < 2; ++conv)
@@ -275,7 +456,12 @@ static void EnableChannels(unsigned int conv, const std::vector<unsigned int>& c
 			check(timeouts > 0, std::string(mc.name) + " hung: its conversions time out");
 			continue;
 		}
-		check(mc.completions >= loopIterations / 8, std::string(mc.name) + " converts regularly (" + std::to_string(mc.completions) + " completions)");
+		// Both converters used: they take turns, one sweep per tick at most. One converter: up to one sweep per tick. If the other converter
+		// hangs, it holds the turn for the timeout (5 ticks) and one more tick each time.
+		const bool otherHung = (conv == 0) ? scenario->sdadcHung : scenario->adc0Hung;
+		const uint64_t minCompletions = otherHung ? simulatedMs / 8 : simulatedMs / (((adc0Used && sdadcUsed) ? 2 : 1) * 2);
+		check(mc.completions >= minCompletions, std::string(mc.name) + " converts regularly (" + std::to_string(mc.completions) + " completions, at least "
+				+ std::to_string(minCompletions) + ")");
 		// A converter must not wait long for its turn: the other one takes at most its conversion time, or the timeout if it hangs
 		check(mc.maxGapUs <= 12000, std::string(mc.name) + " waits at most 12 ms between results (" + std::to_string(mc.maxGapUs) + " us)");
 		for (unsigned int chan : channels)
@@ -291,7 +477,6 @@ static void EnableChannels(unsigned int conv, const std::vector<unsigned int>& c
 	if (!scenario->adc0Hung && !scenario->sdadcHung)
 	{
 		check(timeouts == 0 && errors == 0, "no timeouts and no errors");
-		check(delays == 0, "the task never falls back to delay() while it has channels to convert (" + std::to_string(delays) + ")");
 	}
 	std::fflush(stdout);
 	std::_Exit(failures == 0 ? 0 : 1);
@@ -316,13 +501,13 @@ void TaskBase::GiveFromISR(TaskHandle, uint32_t) noexcept { notified = true; }
 bool TaskBase::TakeIndexed(uint32_t, uint32_t timeout) noexcept
 {
 	LoopStep();
-	const uint64_t deadline = nowUs + (uint64_t)timeout * 1000;
+	const uint64_t deadline = NextTickUs(timeout);
 	while (!notified)
 	{
 		ModelConverter * const conv = NextToFinish(deadline);
 		if (conv == nullptr)
 		{
-			nowUs = deadline;
+			AdvanceTo(deadline);
 			return false;
 		}
 		AdvanceTo(conv->endUs);
@@ -334,11 +519,7 @@ bool TaskBase::TakeIndexed(uint32_t, uint32_t timeout) noexcept
 void delay(uint32_t ms) noexcept
 {
 	LoopStep();
-	if (loopIterations > 1)
-	{
-		++delays;
-	}
-	AdvanceTo(nowUs + (uint64_t)ms * 1000);
+	AdvanceTo(NextTickUs(ms));
 }
 
 [[noreturn]] static void RunScenario(const Scenario& s) noexcept
@@ -346,6 +527,8 @@ void delay(uint32_t ms) noexcept
 	scenario = &s;
 	adc0Conv.hung = s.adc0Hung;
 	sdadcConv.hung = s.sdadcHung;
+	tmc.enabled = s.tmcTask;
+	tmc.eventUs = nowUs + 300;								// the first TMC transfer comes in the middle of a tick
 	AnalogIn::Init(2, 2, false);							// TOOL1LC: DmacChanAdc0Rx 2 (SDADC gets 3), DmacPrioAdcRx 2
 	EnableChannels(0, s.adc0Channels);
 	if (s.enableSdadcAtIteration == 0)

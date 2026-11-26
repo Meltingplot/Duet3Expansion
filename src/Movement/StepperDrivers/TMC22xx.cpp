@@ -2102,6 +2102,9 @@ bool DoTransaction(size_t driverNumber)
 #else
 	dmaFinished = false;
 #endif
+#if SAMC21
+	MutexLocker dmaLock(DmacManager::GetTransferMutex());	// SAM C20/C21 erratum 1.10.4: don't let our DMA transfers run at the same time as those of the ADC task
+#endif
 	TaskBase::ClearCurrentTaskNotifyCount(NotifyIndices::Tmc);
 	currentDriver->StartTransfer();
 
@@ -2128,6 +2131,9 @@ bool DoTransaction(size_t driverNumber)
 	else if (dmaFinished)
 #endif
 	{
+#if SAMC21
+		dmaLock.Release();				// the DMA transfers have finished
+#endif
 		currentDriver->UartTmcHandler();
 #if TMC22xx_SINGLE_DRIVER
 		delay(2);						// TMC22xx can't handle back-to-back reads, so we need a short delay
@@ -2139,6 +2145,9 @@ bool DoTransaction(size_t driverNumber)
 	{
 		// DMA error, or DMA complete and DMA error
 		currentDriver->DmaError();
+#if SAMC21
+		dmaLock.Release();				// DmaError disabled the DMA channels
+#endif
 #if TMC22xx_SINGLE_DRIVER
 		delay(2);						// TMC22xx can't handle back-to-back reads, so we need a short delay
 #endif

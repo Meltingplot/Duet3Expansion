@@ -264,4 +264,36 @@ public:
 class TaskCriticalSectionLocker { public: TaskCriticalSectionLocker() noexcept { } };
 class AtomicCriticalSectionLocker { public: AtomicCriticalSectionLocker() noexcept { } };
 
+// RRFLibraries src/RTOSIface/RTOSIface.h. Take and Release are modelled in adc_take_turns_test.cpp, where the TMC task competes for the mutex.
+class Mutex
+{
+public:
+	void Create(const char *) noexcept { }
+	bool Take(uint32_t timeout = TimeoutUnlimited) noexcept;
+	bool Release() noexcept;
+
+	static constexpr uint32_t TimeoutUnlimited = 0xFFFFFFFFu;
+};
+
+class MutexLocker
+{
+public:
+	explicit MutexLocker(Mutex& m, uint32_t timeout = Mutex::TimeoutUnlimited) noexcept : handle(&m), acquired(m.Take(timeout)) { }
+	~MutexLocker() { Release(); }
+	void Release() noexcept { if (acquired) { handle->Release(); acquired = false; } }
+
+	MutexLocker(const MutexLocker&) = delete;
+	MutexLocker& operator=(const MutexLocker&) = delete;
+
+private:
+	Mutex *handle;
+	bool acquired;
+};
+
+// CoreN2G src/DmacManager.h, SAMC21 only
+namespace DmacManager
+{
+	Mutex& GetTransferMutex() noexcept;
+}
+
 #endif
