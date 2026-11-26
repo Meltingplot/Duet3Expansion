@@ -14,6 +14,10 @@ in `allowlist.txt`; this file has the reasoning and the findings.
   entries, TOOL1LC 20, EXP1HCL 70 and SZP 18: 2 SAFE-PRIMED, 81 SAFE-NO-HEAP, 1 SAFE-NO-TARGET, 2 SAFE-RETURN, 71 of them
   exception handlers. The two `ReadWriteLock` keys went away with RRFLibraries #2, and two SAFE-NO-HEAP keys with the veneer
   fix (see Veneers below).
+- **Upstream sync of 2026-11-26** (3.7-ch, CoreN2G c9b23d7, Duet3Expansion 0f63349f, RRFLibraries d8708f0): upstream replaced
+  the fix of P1 (#20) with an interrupt lock in `_sbrk` and `CoreAllocPermanent` and no lock in `AllocPermanent`, see P1. The
+  free lists take new items from `CoreAllocPermanent`, which is not a target of the check (README, "Targets"). The entries stay
+  the same.
 - **How:** the heap findings were read in the code. The targets of the calls through a register were read by an agent with file
   and line for each target, checked with `alloc-check.py --query` on each target, and spot-checked. One finding outside the
   allowlist came up on the way: P1 below.
@@ -75,6 +79,9 @@ is `bx lr` in all three ELF files (TOOL1LC 0x22abc, EXP1HCL 0x39dfc, SZP 0x1b894
   `__malloc_unlock`, `Tasks::AllocPermanent` and `MessageBufferAlloc` are targets now.
 - Fixed by #20 (6d621673): `Tasks::AllocPermanent` takes `GetMallocMutex` outside the RP2040 builds, as RepRapFirmware's does
   (`Tasks.cpp:323-329` there). Host test `Tools/alloc-permanent-lock-test`. With the fix the three boards have the same entries.
+- Replaced in the sync of 2026-11-26 by upstream's fix at the source: CoreN2G c9b23d7 does the check and the update of `_sbrk`
+  and of `CoreAllocPermanent` each inside an `AtomicCriticalSectionLocker`, and 0f63349f removes the lock from `AllocPermanent`.
+  `Tools/alloc-permanent-lock-test` checks that fix now.
 - Since e539a216 (2023-01-18) and 6d52ab31 (2023-03-31), see the README. Upstream 3.7-dev has the same code.
 
 ## Calls through a register
