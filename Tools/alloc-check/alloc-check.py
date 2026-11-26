@@ -20,12 +20,13 @@ import struct
 import subprocess
 import sys
 
-# The functions that change or read the heap of src/libc/nano-mallocr.c, the end of the heap (_sbrk) and its limit
-# (CoreAllocPermanent) in CoreN2G src/syscalls.h, the malloc mutex of src/Platform/Tasks.cpp, and newlib's malloc lock
-# (__malloc_lock, which Tasks::AllocPermanent of Duet3Expansion called before 6d621673 and still calls in its RP2040 build). A
-# function that calls one of them, directly or through other direct calls, reaches the heap.
+# The functions that change or read the heap of src/libc/nano-mallocr.c, the end of the heap (_sbrk) in CoreN2G src/syscalls.h,
+# the malloc mutex of src/Platform/Tasks.cpp, and newlib's malloc lock (__malloc_lock, which Tasks::AllocPermanent of
+# Duet3Expansion called before 6d621673). A function that calls one of them, directly or through other direct calls, reaches the
+# heap. CoreAllocPermanent is not one of them: since CoreN2G c9b23d7 it takes an interrupt lock and no mutex, so it may be called
+# in every region (README, "Targets").
 HEAP = {'malloc', 'free', 'realloc', 'calloc', 'cfree', 'memalign', 'valloc', 'pvalloc', 'mallinfo', 'malloc_stats', '_malloc_r',
-        '_sbrk', 'CoreAllocPermanent', 'GetMallocMutex', 'ReleaseMallocMutex', '__malloc_lock', '__malloc_unlock'}
+        '_sbrk', 'GetMallocMutex', 'ReleaseMallocMutex', '__malloc_lock', '__malloc_unlock'}
 # A finding names the first of these on its chain, and a function that calls one reaches the heap even when the compiler has
 # inlined the heap functions into it: the C++ allocation functions of libsupc++, the exception allocation of
 # libsupc++, Tasks::AllocPermanent of src/Platform/Tasks.cpp, and MessageBufferAlloc, through which CANlib's

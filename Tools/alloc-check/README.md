@@ -16,11 +16,14 @@ texts, so that the keys and the messages read the same in both repositories. A f
 ## Why
 
 Duet3Expansion's heap is newlib's nano-malloc in `src/libc/nano-mallocr.c`, whose lock is `MALLOC_LOCK`, that is
-`GetMallocMutex` (`nano-mallocr.c:138-142`). `GetMallocMutex` (`src/Platform/Tasks.cpp:139-154`) takes the malloc mutex only
-while the scheduler is running. With the scheduler suspended, or before it starts, it takes nothing. This gives two failures:
-- **The mutex is skipped.** Code that allocates or frees with the scheduler suspended runs `malloc` without the mutex. If a task
-  of the same or a lower priority was preempted inside `malloc`, both work on the free list or the heap top at once. The task
-  priorities are in `src/Platform/TaskPriorities.h:14-34`: main 1, heat 2, Move and CAN receiver 3, CAN sender 5.
+`GetMallocMutex` (`nano-mallocr.c:138-142`). `GetMallocMutex` (`src/Platform/Tasks.cpp:138-154`) takes the malloc mutex
+whenever the scheduler has started; before it starts, it takes nothing. Up to upstream 0f63349f (2026-11-25) it took the mutex
+only while the scheduler was running, so it took nothing with the scheduler suspended either. This gives two failures:
+- **The heap with the scheduler suspended.** Code that allocates or frees with the scheduler suspended takes the malloc mutex
+  then. Since 0f63349f that fails the assertion of `xQueueSemaphoreTake` (FreeRTOS `queue.c:1682`) and the board resets, which
+  upstream intends. Before, `malloc` ran without the mutex: if a task of the same or a lower priority was preempted inside
+  `malloc`, both worked on the free list or the heap top at once. The task priorities are in
+  `src/Platform/TaskPriorities.h:14-34`: main 1, heat 2, Move and CAN receiver 3, CAN sender 5.
 - **The guard is lifted.** If the scheduler is running, taking the mutex runs a FreeRTOS critical section (FreeRTOS
   `queue.c:1688`, `:1737`), also when the mutex is free; only a task that holds it already skips that (`queue.c:833-844`). Its
   end runs `cpsie i` on the SAMC21 (`ARM_CM0/port.c:803-812`) and writes BASEPRI 0 on the SAME51 (`ARM_CM4F/port.c:492-500`).
@@ -28,9 +31,12 @@ while the scheduler is running. With the scheduler suspended, or before it start
 
 In an exception handler the heap is never safe: the interrupted task may be inside `malloc`, and an ISR cannot take a mutex.
 
-`Tasks::AllocPermanent` (`Tasks.cpp:1141-1155`) takes memory from the top of the heap with CoreN2G's `CoreAllocPermanent`, which
-needs the same mutex (CoreN2G `src/syscalls.h:66-78`). Up to 9ac5016c it called newlib's `__malloc_lock`, which takes nothing in
-these builds (see `census.md`, P1). #20 (6d621673) makes it take the malloc mutex.
+`Tasks::AllocPermanent` (`Tasks.cpp:1148-1152`) takes memory from the top of the heap with CoreN2G's `CoreAllocPermanent`, which
+lowers the heap limit that `_sbrk` raises. Up to 9ac5016c it called newlib's `__malloc_lock`, which takes nothing in these builds
+(see `census.md`, P1). The fork fix #20 (6d621673) made it take the malloc mutex. Upstream fixed it at the source instead, and the
+sync of 2026-11-26 took that fix: since CoreN2G c9b23d7 `_sbrk` and `CoreAllocPermanent` each check and move their end of the
+free memory inside an `AtomicCriticalSectionLocker` (CoreN2G `src/syscalls.h:50-86`), and 0f63349f removed the lock from
+`AllocPermanent`. Permanent allocation is now allowed in every region.
 
 ### History of the class
 
@@ -46,6 +52,10 @@ these builds (see `census.md`, P1). #20 (6d621673) makes it take the malloc mute
   `MoveSegment::PrimeFreeList` before the region of `Move::AddLinearSegments`, and the assertion in `GetMallocMutex`.
 - This fork (2026-11-22): K23, `ReadWriteLock` allocating its lock records with the scheduler suspended (RRFLibraries #2), and
   P1 above (#20).
+- Upstream (C. Hammacher, 2026-11-25), taken in the syncs of 2026-11-25 and 2026-11-26: RRFLibraries acefba1 and then d8708f0
+  replaced the K23 fix (the free lists take new items from `CoreAllocPermanent`), CoreN2G c9b23d7 and Duet3Expansion 0f63349f
+  replaced #20, and 0f63349f made `GetMallocMutex` take the mutex with the scheduler suspended, so that the heap there fails an
+  assertion instead of running unprotected.
 
 ## What counts
 
@@ -63,10 +73,13 @@ The check follows the control flow of each function, with the jump tables of the
 and on the Cortex-M0+ the tables of addresses that `mov pc` jumps through and the jumps with `bl` inside a function (Thumb-1 has
 no long branch). The number of table entries comes from the bounds check before the jump.
 
-**Targets.** The functions of `nano-mallocr.c`, `_sbrk` and `CoreAllocPermanent`, `GetMallocMutex`/`ReleaseMallocMutex`, newlib's
+**Targets.** The functions of `nano-mallocr.c`, `_sbrk`, `GetMallocMutex`/`ReleaseMallocMutex`, newlib's
 `__malloc_lock`/`__malloc_unlock`, and the allocation functions `operator new` and `delete`, `Tasks::AllocPermanent` and
-`MessageBufferAlloc` (through which CANlib's `CanMessageBuffer` allocates; in EXP1HCL with the fix the compiler inlines all of
-`Tasks::AllocPermanent` into it).
+`MessageBufferAlloc` (through which CANlib's `CanMessageBuffer` allocates; in EXP1HCL with #20 the compiler inlined all of
+`Tasks::AllocPermanent` into it). `CoreAllocPermanent` is not a target since 2026-11-26: it takes an interrupt lock and no mutex
+(c9b23d7). It never matched before either, because the name of a C++ function has its parameter list; its only caller was
+`Tasks::AllocPermanent`, which is a target. `Tasks::AllocPermanent` and `MessageBufferAlloc` are still targets, so the two
+SAFE-PRIMED `Move::AddLinearSegments` keys stay.
 
 **Calls through a register** are findings of their own (target `indirect call`); `census.md` names their targets. The veneers
 of the linker (`__*_veneer`), through which the SAMC21 boards call their step functions in RAM, are followed to the function at

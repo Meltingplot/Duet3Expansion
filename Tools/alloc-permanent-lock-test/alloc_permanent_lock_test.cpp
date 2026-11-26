@@ -1,18 +1,19 @@
-// Host test of the lock that Tasks::AllocPermanent (src/Platform/Tasks.cpp) takes, compiled from the real text of the malloc mutex
-// functions and Tasks::AllocPermanent, and of _sbrk and CoreAllocPermanent from CoreN2G's src/syscalls.h, that the Makefile extracts.
+// Host test of the lock that keeps Tasks::AllocPermanent (src/Platform/Tasks.cpp) from racing malloc, compiled from the real text of
+// the malloc mutex functions and Tasks::AllocPermanent, and of _sbrk and CoreAllocPermanent from CoreN2G's src/syscalls.h, that the
+// Makefile extracts.
 //
-// Our malloc (src/libc/nano-mallocr.c) takes the malloc mutex through GetMallocMutex. _sbrk raises heapTop up to heapLimit, and
-// CoreAllocPermanent lowers heapLimit down to heapTop, so the two must not run at the same time; syscalls.h says to take the malloc
-// mutex before calling CoreAllocPermanent. Up to 3.7-dev 9ac5016c, Tasks::AllocPermanent called newlib's __malloc_lock instead, which
-// is the lock of newlib's own malloc and the RP2040 builds. Our builds do not replace it, and newlib's calls
-// __retarget_lock_acquire_recursive, which is empty (bx lr in the TOOL1LC, EXP1HCL and SZP ELF files). So AllocPermanent took no lock,
-// and a task that allocated permanent memory (MoveSegment, CanMessageBuffer) while another one was inside malloc could hand out memory
-// that the other task's _sbrk hands out too.
+// Our malloc (src/libc/nano-mallocr.c) takes the malloc mutex through GetMallocMutex and grows the heap with _sbrk, which raises heapTop
+// up to heapLimit. CoreAllocPermanent lowers heapLimit down to heapTop, so the two must not interleave. Up to 3.7-dev 9ac5016c,
+// Tasks::AllocPermanent called newlib's __malloc_lock, which does nothing in our builds (bx lr in the TOOL1LC, EXP1HCL and SZP ELF
+// files), so a task that allocated permanent memory (MoveSegment, CanMessageBuffer) while another one was inside malloc could hand out
+// memory that the other task's _sbrk hands out too. Upstream fixed this in CoreN2G c9b23d7 and Duet3Expansion 0f63349f: _sbrk and
+// CoreAllocPermanent each do their check and update inside an AtomicCriticalSectionLocker, and AllocPermanent takes no mutex.
 //
-// The test plays the malloc mutex, the scheduler state and the interrupt mask. On one thread it checks that AllocPermanent changes the
-// heap limit while it holds the malloc mutex, that it waits for a task that is inside malloc, that it takes nothing while the scheduler
-// is suspended or not started (like malloc), and that it asserts with interrupts masked (like malloc, since e847c690). With "threads"
-// it runs malloc's part (the mutex and _sbrk) and AllocPermanent on two threads, for ThreadSanitizer to check that they do not race.
+// The test plays the interrupt mask, the malloc mutex and the scheduler state. On one thread it checks that _sbrk and AllocPermanent
+// change the heap pointers inside the interrupt lock, that AllocPermanent takes no malloc mutex, works while the scheduler is suspended
+// or not started and leaves the interrupt mask as it was, and that GetMallocMutex takes the mutex while the scheduler is suspended (so
+// FreeRTOS asserts, as upstream d85662412 and 0f63349f intend) but not before it has started. With "threads" it runs malloc's part (the
+// mutex and _sbrk) and AllocPermanent on two threads, for ThreadSanitizer to check that they do not race.
 
 #include <cerrno>
 #include <cstddef>
@@ -47,9 +48,29 @@ constexpr int taskSCHEDULER_RUNNING = 2;
 static int schedulerState = taskSCHEDULER_RUNNING;
 extern "C" int xTaskGetSchedulerState() noexcept { return schedulerState; }
 
-static uint32_t primask = 0, basepri = 0;
+// Per thread, because with "threads" each thread stands for a task with its own interrupt state
+static thread_local uint32_t primask = 0, basepri = 0;
 static uint32_t __get_PRIMASK() noexcept { return primask; }
 static uint32_t __get_BASEPRI() noexcept { return basepri; }
+
+// CoreN2G CoreIO.h:353-372 with Core.h:409-435: saves PRIMASK, disables interrupts and restores PRIMASK when it goes out of scope.
+// Played: on one thread it counts and records the heap pointers when it is taken and released. With "threads" it is a global mutex,
+// because on the single-core board nothing else runs while interrupts are disabled.
+static bool threaded = false;
+static std::mutex interruptsDisabled;
+static unsigned int irqLocks = 0;
+static const char *limitAtIrqLock = nullptr, *limitAtIrqUnlock = nullptr;
+static char *topAtIrqLock = nullptr, *topAtIrqUnlock = nullptr;
+
+class AtomicCriticalSectionLocker
+{
+public:
+	AtomicCriticalSectionLocker() noexcept;
+	~AtomicCriticalSectionLocker() noexcept;
+
+private:
+	uint32_t flags;
+};
 
 // The Mutex of RRFLibraries RTOSIface.h, played: see Take and Release below
 class Mutex
@@ -84,22 +105,39 @@ namespace Tasks
 #undef uint32_t
 #include "Tasks.inc"
 
-// The mutex. On one thread it counts, records the heap limit when it is taken and released, and lets the task that is inside malloc
-// finish first, as the real mutex does when that task holds it. With "threads" it is a real recursive mutex.
-static bool threaded = false;
+AtomicCriticalSectionLocker::AtomicCriticalSectionLocker() noexcept : flags(primask)
+{
+	if (threaded)
+	{
+		interruptsDisabled.lock();
+	}
+	else
+	{
+		++irqLocks;
+		limitAtIrqLock = heapLimit;
+		topAtIrqLock = heapTop;
+	}
+	primask = 1;
+}
+
+AtomicCriticalSectionLocker::~AtomicCriticalSectionLocker() noexcept
+{
+	if (threaded)
+	{
+		primask = flags;
+		interruptsDisabled.unlock();
+		return;
+	}
+	limitAtIrqUnlock = heapLimit;
+	topAtIrqUnlock = heapTop;
+	primask = flags;
+}
+
+// The mutex. On one thread it counts and, like FreeRTOS, asserts when it is taken while the scheduler is suspended: Mutex::Take waits
+// without a time limit (RTOSIface.h:113), and xQueueSemaphoreTake asserts that it is not asked to wait while the scheduler is suspended
+// (FreeRTOS src/queue.c:1682). With "threads" it is a real recursive mutex.
 static std::recursive_mutex realMutex;
 static unsigned int takes = 0, releases = 0;
-static const char *limitAtTake = nullptr, *limitAtRelease = nullptr;
-static bool otherTaskInsideMalloc = false;			// another task holds the malloc mutex inside malloc and is about to call _sbrk
-static size_t otherTaskRequest = 0;
-static char *otherTaskChunk = nullptr;
-
-// The other task's malloc goes on: it calls _sbrk and then releases the mutex
-static void FinishOtherTask() noexcept
-{
-	otherTaskInsideMalloc = false;
-	otherTaskChunk = static_cast<char *>(_sbrk((ptrdiff_t)otherTaskRequest));
-}
 
 void Mutex::Take() noexcept
 {
@@ -108,12 +146,11 @@ void Mutex::Take() noexcept
 		realMutex.lock();
 		return;
 	}
-	if (otherTaskInsideMalloc)
-	{
-		FinishOtherTask();								// the caller blocks until the other task releases the mutex
-	}
 	++takes;
-	limitAtTake = heapLimit;
+	if (schedulerState == taskSCHEDULER_SUSPENDED)
+	{
+		AssertFailed("FreeRTOS src/queue.c", 1682);
+	}
 }
 
 void Mutex::Release() noexcept
@@ -124,7 +161,6 @@ void Mutex::Release() noexcept
 		return;
 	}
 	++releases;
-	limitAtRelease = heapLimit;
 }
 
 alignas(8) static char arena[1 << 20];
@@ -136,10 +172,10 @@ static void Reset() noexcept
 	heapLimit = arena + 3072;
 	schedulerState = taskSCHEDULER_RUNNING;
 	primask = basepri = 0;
+	irqLocks = 0;
+	limitAtIrqLock = limitAtIrqUnlock = nullptr;
+	topAtIrqLock = topAtIrqUnlock = nullptr;
 	takes = releases = 0;
-	limitAtTake = limitAtRelease = nullptr;
-	otherTaskInsideMalloc = false;
-	otherTaskChunk = nullptr;
 	failures.clear();
 }
 
@@ -159,11 +195,6 @@ static void Report(const char *name, std::string why) noexcept
 		++failed;
 		printf("FAIL %s: %s\n", name, why.c_str());
 	}
-}
-
-static bool Overlap(const char *a, size_t na, const char *b, size_t nb) noexcept
-{
-	return a < b + nb && b < a + na;
 }
 
 static int Threads() noexcept
@@ -203,47 +234,75 @@ int main(int argc, char **argv)
 		const char *const oldLimit = heapLimit;
 		void *const p = Tasks::AllocPermanent(100);
 		std::string why;
-		if (takes != 1 || releases != 1) { why = "the malloc mutex was taken " + std::to_string(takes) + " times and released " + std::to_string(releases) + " times"; }
-		else if (limitAtTake != oldLimit || limitAtRelease != p || heapLimit != p) { why = "the heap limit did not change while the mutex was held"; }
-		Report("AllocPermanent lowers the heap limit while it holds the malloc mutex", why);
+		if (irqLocks != 1) { why = "the interrupt lock was taken " + std::to_string(irqLocks) + " times"; }
+		else if (limitAtIrqLock != oldLimit || limitAtIrqUnlock != p || heapLimit != p) { why = "the heap limit did not change inside the interrupt lock"; }
+		if (takes != 0 || releases != 0) { why += (why.empty() ? "" : "; ") + std::string("the malloc mutex was taken"); }
+		Report("AllocPermanent lowers the heap limit inside the interrupt lock and takes no malloc mutex", why);
 	}
 
 	{
 		Reset();
-		otherTaskInsideMalloc = true;
-		otherTaskRequest = 512;
-		char *const p = static_cast<char *>(Tasks::AllocPermanent(256));
+		char *const oldTop = heapTop;
+		void *const p = _sbrk(64);
 		std::string why;
-		if (otherTaskInsideMalloc)
-		{
-			why = "AllocPermanent did not wait for the task inside malloc";
-			FinishOtherTask();
-		}
-		if (otherTaskChunk == nullptr || Overlap(otherTaskChunk, otherTaskRequest, p, 256)) { why += " the two allocations overlap"; }
-		Report("AllocPermanent waits for a task that is inside malloc", why);
+		if (irqLocks != 1) { why = "the interrupt lock was taken " + std::to_string(irqLocks) + " times"; }
+		else if (p != oldTop || topAtIrqLock != oldTop || topAtIrqUnlock != oldTop + 64 || heapTop != oldTop + 64) { why = "the heap top did not change inside the interrupt lock"; }
+		Report("_sbrk raises the heap top inside the interrupt lock", why);
 	}
 
 	{
 		Reset();
 		schedulerState = taskSCHEDULER_SUSPENDED;
-		(void)Tasks::AllocPermanent(16);
+		const char *const oldLimit = heapLimit;
+		const void *const p1 = Tasks::AllocPermanent(16);
 		schedulerState = taskSCHEDULER_NOT_STARTED;
-		(void)Tasks::AllocPermanent(16);
-		Report("AllocPermanent takes nothing while the scheduler is suspended or not started, as malloc", (takes == 0 && releases == 0) ? "" : "the mutex was taken");
+		const void *const p2 = Tasks::AllocPermanent(16);
+		std::string why;
+		if (takes != 0 || releases != 0) { why = "the malloc mutex was taken"; }
+		else if (p1 >= oldLimit || p2 >= p1) { why = "no memory was allocated"; }
+		Report("AllocPermanent works while the scheduler is suspended or not started", why);
 	}
 
 	{
 		Reset();
 		primask = 1;
 		(void)Tasks::AllocPermanent(16);
+		const bool keptMasked = (primask == 1);
+		primask = 0;
+		(void)Tasks::AllocPermanent(16);
+		const bool keptUnmasked = (primask == 0);
+		Report("AllocPermanent leaves the interrupt mask as it found it", (keptMasked && keptUnmasked) ? "" : "the interrupt mask changed");
+	}
+
+	{
+		Reset();
+		schedulerState = taskSCHEDULER_SUSPENDED;
+		GetMallocMutex();
+		ReleaseMallocMutex();
+		const bool tookSuspended = (takes == 1 && releases == 1 && failures.size() == 1);
+		failures.clear();
+		schedulerState = taskSCHEDULER_NOT_STARTED;
+		GetMallocMutex();
+		ReleaseMallocMutex();
+		const bool skippedNotStarted = (takes == 1 && releases == 1);
+		Report("GetMallocMutex takes the mutex while the scheduler is suspended, so FreeRTOS asserts, and not before it has started",
+				(tookSuspended && skippedNotStarted) ? "" : "taken " + std::to_string(takes) + " times, released " + std::to_string(releases) + " times");
+	}
+
+	{
+		Reset();
+		primask = 1;
+		GetMallocMutex();
+		ReleaseMallocMutex();
 		const bool assertedPrimask = failures.size() == 1;
 		failures.clear();
 		primask = 0;
 		basepri = 0x20;
-		(void)Tasks::AllocPermanent(16);
+		GetMallocMutex();
+		ReleaseMallocMutex();
 		const bool assertedBasepri = failures.size() == 1;
 		failures.clear();
-		Report("AllocPermanent asserts with PRIMASK or BASEPRI set and the scheduler running, as malloc", (assertedPrimask && assertedBasepri) ? "" : "it did not assert");
+		Report("GetMallocMutex asserts with PRIMASK or BASEPRI set and the scheduler running", (assertedPrimask && assertedBasepri) ? "" : "it did not assert");
 	}
 
 	printf("%u passed, %u failed\n", passed, failed);
