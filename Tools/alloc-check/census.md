@@ -18,6 +18,8 @@ in `allowlist.txt`; this file has the reasoning and the findings.
   the fix of P1 (#20) with an interrupt lock in `_sbrk` and `CoreAllocPermanent` and no lock in `AllocPermanent`, see P1. The
   free lists take new items from `CoreAllocPermanent`, which is not a target of the check (README, "Targets"). The entries stay
   the same.
+- **CoreN2G #9 (760a99b), first pinned with the sync of 2026-11-26:** two new SAFE-NO-HEAP keys on TOOL1LC and SZP,
+  `AdcClass::InternalEnableChannel` and `SdAdcClass::InternalEnableChannel [suspended] -> indirect call` (see Task regions).
 - **How:** the heap findings were read in the code. The targets of the calls through a register were read by an agent with file
   and line for each target, checked with `alloc-check.py --query` on each target, and spot-checked. One finding outside the
   allowlist came up on the way: P1 below.
@@ -119,6 +121,12 @@ Each group shares one reason in `allowlist.txt`. CoreN2G is abbreviated CN, `CN/
 - **AnalogIn** (`AdcClass::ExecuteCallbacks`, `SdAdcClass::ExecuteCallbacks` on SAMC21, `TaskLoop` on EXP1HCL; AIN task, 2):
   `AveragingFilter::CallbackFeedIntoFilter` (`AveragingFilter.h:84-91`) or `InputMonitor::CommonAnalogPortInterrupt`
   (`InputMonitor.cpp:112`, a task notification).
+- **AnalogIn channel enable** (`AdcClass::InternalEnableChannel`, `SdAdcClass::InternalEnableChannel` on SAMC21, the task that
+  enables a channel; added 2026-11-26): CoreN2G #9 (760a99b) made `ReInit` virtual, so that `AdcBase::AbandonConversionIfTimedOut`
+  can reset a timed-out converter. The call of `ReInit` inside the `TaskCriticalSectionLocker` of `InternalEnableChannel`
+  (CoreN2G `SAMC21/AnalogIn.cpp:325`, `:540`) is now a virtual call. Its targets are `AdcClass::ReInit` (`:237-298`) and
+  `SdAdcClass::ReInit` (`:483`), which reset and program the converter and set up its DMA channel through `DmacManager`.
+  `alloc-check.py --query` finds no path from either to the heap or to a call through a register.
 - **Step functions** (`Move::AddLinearSegments` in the Move task, 3; `Move::PhaseStepControlLoop` and
   `ClosedLoop::InstanceControlLoop` in the TMC task; `Move::ProcessM970` in main): the text of a step error. At the basis it
   went to `debugPrintf` (`RepRapFirmware.cpp:30-39`), whose putc `CanInterface::DebugPutc` (`CanInterface.cpp:962-974`) writes
