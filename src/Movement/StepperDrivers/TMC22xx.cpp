@@ -2102,6 +2102,9 @@ bool DoTransaction(size_t driverNumber)
 #else
 	dmaFinished = false;
 #endif
+#if SAMC21
+	MutexLocker dmaLock(DmacManager::GetTransferMutex());	// SAM C20/C21 erratum 1.10.4: don't let our DMA transfers run at the same time as those of the ADC task
+#endif
 	TaskBase::ClearCurrentTaskNotifyCount(NotifyIndices::Tmc);
 	currentDriver->StartTransfer();
 
@@ -2121,6 +2124,10 @@ bool DoTransaction(size_t driverNumber)
 	if (timedOut)
 	{
 		currentDriver->TransferTimedOut();
+#if SAMC21
+		dmaLock.Release();				// TransferTimedOut disabled the DMA channels
+		TaskBase::Yield();				// there is no delay on this path, so let the AIN task, which has our priority, take the mutex before our next transfer
+#endif
 	}
 #if RP2040 || TMC22xx_USES_SERCOM
 	else if (dmaFinishedReason == DmaCallbackReason::complete)
@@ -2128,6 +2135,9 @@ bool DoTransaction(size_t driverNumber)
 	else if (dmaFinished)
 #endif
 	{
+#if SAMC21
+		dmaLock.Release();				// the DMA transfers have finished
+#endif
 		currentDriver->UartTmcHandler();
 #if TMC22xx_SINGLE_DRIVER
 		delay(2);						// TMC22xx can't handle back-to-back reads, so we need a short delay
@@ -2139,6 +2149,9 @@ bool DoTransaction(size_t driverNumber)
 	{
 		// DMA error, or DMA complete and DMA error
 		currentDriver->DmaError();
+#if SAMC21
+		dmaLock.Release();				// DmaError disabled the DMA channels
+#endif
 #if TMC22xx_SINGLE_DRIVER
 		delay(2);						// TMC22xx can't handle back-to-back reads, so we need a short delay
 #endif
