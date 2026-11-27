@@ -17,11 +17,16 @@ the two TMC channels until they are off again:
 - after a completed transfer the DMAC has disabled both channels by itself, so `DoTransaction` releases the mutex before
   `UartTmcHandler` and `delay(2)`;
 - after a DMA error `DmaError` disables them (`AbortTransfer`), then the mutex is released before `delay(2)`;
-- after a timeout `TransferTimedOut` disables them, and the `MutexLocker` releases the mutex on return. There is no `delay(2)` on that
-  path, before or after the fix.
+- after a timeout `TransferTimedOut` disables them, then the mutex is released and the task yields. There is no `delay(2)` on that path,
+  before or after the fix.
 
 On the TOOL1LC, the only SAMC21 board with a TMC22xx driver, the AIN and TMC tasks have the same priority (`AinPriority` and `TmcOpenLoop`
-2, `src/Platform/TaskPriorities.h`).
+2, `src/Platform/TaskPriorities.h`). Releasing a FreeRTOS mutex makes a waiting task ready, but switches to it only if it has a higher
+priority (`xTaskRemoveFromEventList` in FreeRTOS `tasks.c`). So `DoTransaction` must yield or block after it has released the mutex, else
+the TMC task loop (`DriversState::ready` calls it again at once) takes the mutex again before the AIN task can run. After a completed
+transfer or a DMA error `delay(2)` blocks. After a timeout nothing did: while the driver did not answer, the TMC task held the mutex for
+`TransferTimeout` (10 ticks) at a time, and the AIN task got it only if a tick fell between the release and the next take. Its sweeps,
+and with them the temperature readings, would nearly stop. Not seen on the board: the lab runs had no TMC timeouts.
 
 ## What the test compiles
 
@@ -41,9 +46,11 @@ The checks, for each of the four outcomes:
 - the channels are enabled only while the mutex is held, the mutex is held while the transfer runs, and it is never released while a
   channel is enabled;
 - the mutex is not held in `delay(2)` or while `UartTmcHandler` processes the reply;
+- after the mutex is released the task yields or blocks before `DoTransaction` returns, and it never yields while it holds the mutex;
 - it is taken once and released once, and the channels are off when `DoTransaction` returns.
 
-Without the fix (Duet3Expansion 974e1645a) all 4 scenarios fail: the channels run without the mutex and it is never taken.
+Without the fix (Duet3Expansion 974e1645a) all 4 scenarios fail: the channels run without the mutex and it is never taken. Without the
+yield after a timeout (Duet3Expansion cb86a7039) the `timeout` scenario fails.
 
 Not covered:
 - a wake-up without a DMA callback. In the TOOL1LC build only `TransferCompleteCallback` gives `NotifyIndices::Tmc` (the UART handler

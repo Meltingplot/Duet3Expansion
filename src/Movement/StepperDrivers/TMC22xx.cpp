@@ -2124,6 +2124,10 @@ bool DoTransaction(size_t driverNumber)
 	if (timedOut)
 	{
 		currentDriver->TransferTimedOut();
+#if SAMC21
+		dmaLock.Release();				// TransferTimedOut disabled the DMA channels
+		TaskBase::Yield();				// there is no delay on this path, so let the AIN task, which has our priority, take the mutex before our next transfer
+#endif
 	}
 #if RP2040 || TMC22xx_USES_SERCOM
 	else if (dmaFinishedReason == DmaCallbackReason::complete)

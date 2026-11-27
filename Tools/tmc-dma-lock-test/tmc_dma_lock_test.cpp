@@ -3,7 +3,9 @@
 // in delay(2) or while it processes the reply. SAM C20/C21 erratum 1.10.4 (DS80000740): with the triggers of several DMA channels active
 // at the same time the DMAC may corrupt the write-back descriptors, and on the TOOL1LC it overwrote the one of the ADC channel with the
 // state of the TMC transmit channel (finding TL3). The AIN task holds the same mutex while an ADC channel is enabled, which
-// Tools/adc-take-turns-test checks. The Makefile extracts the real text of DoTransaction; this file models what it calls. See README.md.
+// Tools/adc-take-turns-test checks. On the TOOL1LC both tasks have the same priority, and releasing a FreeRTOS mutex does not switch to a waiting
+// task of the same priority, so DoTransaction must yield or block after it has released the mutex, before it can take it again.
+// The Makefile extracts the real text of DoTransaction; this file models what it calls. See README.md.
 
 #include <cstddef>
 #include <cstdint>
@@ -37,7 +39,8 @@ static bool mutexHeld = false;
 static unsigned int takes = 0, releases = 0;
 static bool dmaActive = false;									// the TMC DMA channels are enabled
 static unsigned int startsWithoutMutex = 0, waitsWithoutMutex = 0, abortsWithoutMutex = 0, releasesWithDmaActive = 0;
-static unsigned int delaysWithMutex = 0, handlerWithMutex = 0;
+static unsigned int delaysWithMutex = 0, handlerWithMutex = 0, yieldsWithMutex = 0;
+static bool turnGiven = false;									// the task has yielded or blocked since it released the mutex
 static unsigned int handlerCalls = 0, timeoutCalls = 0, dmaErrorCalls = 0, delays = 0;
 static uint32_t lastTimeout = 0;
 
@@ -54,6 +57,7 @@ public:
 			++releasesWithDmaActive;
 		}
 		mutexHeld = false;
+		turnGiven = false;
 		++releases;
 		return true;
 	}
@@ -86,6 +90,18 @@ static DmaCallbackReason dmaFinishedReason;						// TMC22xx.cpp, written by Tran
 namespace TaskBase
 {
 	void ClearCurrentTaskNotifyCount(uint32_t) noexcept { }
+
+	void Yield() noexcept
+	{
+		if (mutexHeld)
+		{
+			++yieldsWithMutex;
+		}
+		else
+		{
+			turnGiven = true;
+		}
+	}
 
 	// The TMC task waits for TransferCompleteCallback. It runs when the receive channel has finished or has had an error.
 	bool TakeIndexed(uint32_t index, uint32_t timeout) noexcept
@@ -120,6 +136,10 @@ void delay(uint32_t) noexcept
 	if (mutexHeld)
 	{
 		++delaysWithMutex;
+	}
+	else
+	{
+		turnGiven = true;
 	}
 }
 
@@ -190,7 +210,8 @@ int main()
 		outcome = s.outcome;
 		mutexHeld = dmaActive = false;
 		takes = releases = startsWithoutMutex = waitsWithoutMutex = abortsWithoutMutex = releasesWithDmaActive = 0;
-		delaysWithMutex = handlerWithMutex = handlerCalls = timeoutCalls = dmaErrorCalls = delays = 0;
+		delaysWithMutex = handlerWithMutex = yieldsWithMutex = handlerCalls = timeoutCalls = dmaErrorCalls = delays = 0;
+		turnGiven = false;
 		dmaFinishedReason = DmaCallbackReason::none;
 
 		const bool result = DoTransaction(0);
@@ -214,6 +235,8 @@ int main()
 		check(releasesWithDmaActive == 0, "the mutex is never released while a channel is enabled");
 		check(delaysWithMutex == 0, "the mutex is not held in delay(2)");
 		check(handlerWithMutex == 0, "the mutex is not held while the reply is processed");
+		check(yieldsWithMutex == 0, "the task does not yield while it holds the mutex");
+		check(turnGiven, "after it has released the mutex the task yields or blocks before DoTransaction returns, so the AIN task can take it");
 		check(takes == 1 && releases == 1 && !mutexHeld, "taken once and released once (" + std::to_string(takes) + " / " + std::to_string(releases) + ")");
 		check(!dmaActive, "the channels are off when DoTransaction returns");
 		if (failures != 0)
