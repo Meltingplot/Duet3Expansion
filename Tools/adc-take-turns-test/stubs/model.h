@@ -260,6 +260,7 @@ public:
 	static TaskHandle GetCallerTaskHandle() noexcept;
 	static void GiveFromISR(TaskHandle h, uint32_t index) noexcept;
 	static bool TakeIndexed(uint32_t index, uint32_t timeout) noexcept;
+	static void Yield() noexcept;
 };
 class TaskCriticalSectionLocker { public: TaskCriticalSectionLocker() noexcept { } };
 class AtomicCriticalSectionLocker { public: AtomicCriticalSectionLocker() noexcept { } };

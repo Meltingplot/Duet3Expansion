@@ -59,14 +59,16 @@ static uint64_t nowUs = 1000000;
 static bool notified = false;
 static int taskHandleDummy;
 static unsigned int loopIterations = 0, overlaps = 0, restartsWhileConverting = 0;
-static unsigned int startsInSameTick = 0, startsWithoutMutex = 0, callbacksWithMutex = 0;
-static uint32_t lastStartTick = 0;
-static bool anyStart = false;
+static unsigned int startsWithoutMutex = 0, callbacksWithMutex = 0;
+static unsigned int takesWithoutTime = 0;					// passes of the loop in a row that did not let the time advance
+static uint64_t lastTakeUs = 0;
 
 // The DMA transfer mutex and the TMC task of the TOOL1LC that competes for it, as Duet3Expansion src/Movement/StepperDrivers/TMC22xx.cpp
 // DoTransaction does it: take the mutex, run a UART transfer on two DMA channels, release the mutex, then delay(2) before the next one.
 // TmcTransferUs is about a register read at DriversBaudRate 200000 (src/Config/TOOL1LC.h): 4 bytes out, 8 bytes back, 10 bits each.
-// A TMC task that is waiting for the mutex gets it when the AIN task releases it; the AIN task blocks in delay(1) right after that.
+// Both tasks have priority 2 on the TOOL1LC (src/Platform/TaskPriorities.h). Releasing a FreeRTOS mutex makes a waiting task ready, but switches to
+// it only if it has a higher priority (FreeRTOS tasks.c, xTaskRemoveFromEventList). So a TMC task that is waiting for the mutex takes it only when
+// the AIN task yields or blocks without holding it. The model runs the AIN task's code in no time, so a tick cannot switch between its tasks there.
 enum class Holder : uint8_t { none, ain, tmc };
 static Holder holder = Holder::none;
 
@@ -100,13 +102,6 @@ void ModelSoftwareTrigger(ModelConverter *conv) noexcept
 			++overlaps;
 		}
 	}
-	const uint32_t tick = millis();
-	if (anyStart && tick == lastStartTick)
-	{
-		++startsInSameTick;
-	}
-	anyStart = true;
-	lastStartTick = tick;
 	conv->converting = true;
 	conv->endUs = nowUs + conv->durationUs;
 }
@@ -217,6 +212,15 @@ static void TmcEvent() noexcept
 	}
 }
 
+// The AIN task yields or blocks: a TMC task that is waiting for the free mutex runs and takes it
+static void LetWaitingTmcRun() noexcept
+{
+	if (tmc.enabled && tmc.waiting && holder == Holder::none)
+	{
+		TmcStartTransfer();
+	}
+}
+
 static void AdvanceTo(uint64_t t) noexcept
 {
 	for (;;)
@@ -245,12 +249,23 @@ static uint64_t NextTickUs(uint32_t ticks) noexcept
 	return ((nowUs / 1000) + ticks) * 1000;					// FreeRTOS counts a delay or timeout from the current tick
 }
 
-// The AIN task's side of the mutex. A TMC transfer that holds it runs to its end first.
+// The AIN task's side of the mutex. A TMC transfer that holds it runs to its end first. A free mutex is taken at once, even if the TMC task is
+// waiting for it, because that task has not run since the mutex was released.
 Mutex transferMutex;
 Mutex& DmacManager::GetTransferMutex() noexcept { return transferMutex; }
 
 bool Mutex::Take(uint32_t) noexcept
 {
+	// A loop that never blocks would not let the time advance, and the scenario would not end
+	takesWithoutTime = (nowUs == lastTakeUs) ? takesWithoutTime + 1 : 0;
+	lastTakeUs = nowUs;
+	if (takesWithoutTime > 1000)
+	{
+		std::printf("    FAIL the AIN task loops without blocking\n");
+		std::fflush(stdout);
+		std::_Exit(1);
+	}
+
 	const uint64_t start = nowUs;
 	while (holder == Holder::tmc)
 	{
@@ -266,11 +281,7 @@ bool Mutex::Take(uint32_t) noexcept
 
 bool Mutex::Release() noexcept
 {
-	holder = Holder::none;
-	if (tmc.enabled && tmc.waiting)
-	{
-		TmcStartTransfer();
-	}
+	holder = Holder::none;									// a waiting TMC task becomes ready, but does not run yet
 	return true;
 }
 
@@ -336,7 +347,7 @@ static const Scenario scenarios[] =
 {
 	{ "turns", "TOOL1LC channels: ADC0 temp0, board type, Vssa, Vref, Vin; SDADC Vref/Vssa; TMC task",
 		{ 3, 5, 6, 7, 8 }, { 0 }, false, false, 0, 4000, true },
-	{ "adc0-only", "no SDADC channel and no TMC task (SZP with temp0 on ADC0): ADC0 converts once per tick",
+	{ "adc0-only", "no SDADC channel and no TMC task (SZP with temp0 on ADC0): ADC0 converts back to back",
 		{ 3, 7 }, { }, false, false, 0, 2000, false },
 	{ "sdadc-enabled-later", "the SDADC channel is enabled while ADC0 is running; TMC task",
 		{ 6, 7, 8 }, { 0 }, false, false, 100, 4000, true },
@@ -344,6 +355,8 @@ static const Scenario scenarios[] =
 		{ 6, 7, 8 }, { 0 }, false, true, 0, 2000, true },
 	{ "adc0-hung", "ADC0 never finishes: the SDADC and the TMC task still get their turns",
 		{ 6, 7, 8 }, { 0 }, true, false, 0, 2000, true },
+	{ "idle", "no channel enabled yet and no TMC task: the loop waits instead of spinning",
+		{ }, { }, false, false, 0, 500, false },
 };
 
 static const Scenario *scenario = nullptr;
@@ -420,7 +433,6 @@ static void EnableChannels(unsigned int conv, const std::vector<unsigned int>& c
 
 	check(overlaps == 0, "ADC0 and SDADC never convert at the same time (overlapping starts: " + std::to_string(overlaps) + ")");
 	check(restartsWhileConverting == 0, "no converter is started again while it is converting (" + std::to_string(restartsWhileConverting) + ")");
-	check(startsInSameTick == 0, "at most one conversion starts per tick (" + std::to_string(startsInSameTick) + " more)");
 	check(startsWithoutMutex == 0, "an ADC DMA channel is enabled only while the AIN task holds the DMA transfer mutex ("
 			+ std::to_string(startsWithoutMutex) + " without)");
 	check(callbacksWithMutex == 0, "the callbacks run after the AIN task has released the mutex (" + std::to_string(callbacksWithMutex) + " with)");
@@ -440,6 +452,11 @@ static void EnableChannels(unsigned int conv, const std::vector<unsigned int>& c
 	}
 
 	const bool adc0Used = !scenario->adc0Channels.empty(), sdadcUsed = !scenario->sdadcChannels.empty();
+	if (!adc0Used && !sdadcUsed)
+	{
+		check(simulatedMs + 1 >= loopIterations, "without channels each pass waits at least one tick (" + std::to_string(loopIterations) + " passes in "
+				+ std::to_string(simulatedMs) + " ms)");
+	}
 	for (unsigned int conv = 0; conv < 2; ++conv)
 	{
 		ModelConverter& mc = *converters[conv];
@@ -519,7 +536,14 @@ bool TaskBase::TakeIndexed(uint32_t, uint32_t timeout) noexcept
 void delay(uint32_t ms) noexcept
 {
 	LoopStep();
+	LetWaitingTmcRun();
 	AdvanceTo(NextTickUs(ms));
+}
+
+// taskYIELD: the TMC task, which has the same priority, runs if it is ready
+void TaskBase::Yield() noexcept
+{
+	LetWaitingTmcRun();
 }
 
 [[noreturn]] static void RunScenario(const Scenario& s) noexcept
